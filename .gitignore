@@ -2,7 +2,8 @@
 node_modules
 bun.lock
 
-# out
+# files
+in
 out
 
 # macos

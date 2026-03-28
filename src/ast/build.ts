@@ -45,7 +45,10 @@ const buildMappedFile = (inputJS: string): string => {
 
     for (const { name, regex } of variableRegexes) {
         regex.lastIndex = 0;
+        const t = performance.now();
         const match = regex.exec(inputJS);
+        const elapsed = performance.now() - t;
+        if (elapsed > 500) console.warn(`[slow regex] ${name} took ${elapsed.toFixed(1)}ms`);
 
         if (match && match[1]) {
             variableRenames[match[1]] = name;
@@ -294,7 +297,7 @@ const buildMappedFile = (inputJS: string): string => {
         }
     });
 
-    console.log('[ast1] ran automatic babylon remapping & class remapping in', benchmark());
+    console.log('[ast1] ran auto babylon & class remapping remapping in', benchmark());
 
     traverse(ast, {
         FunctionDeclaration(path) {
@@ -322,7 +325,7 @@ const buildMappedFile = (inputJS: string): string => {
 
     console.log('[ast1] ran function remapping in', benchmark());
 
-    console.log('[ast1] functionRenames:', functionRenames);
+    // console.log('[ast1] functionRenames:', functionRenames);
 
     traverse(ast, {
         VariableDeclarator(path) {
@@ -387,8 +390,6 @@ const buildMappedFile = (inputJS: string): string => {
 
     inputJS = generate(ast, { retainLines: false, compact: false }).code;
     console.log('[ast1] generated in', benchmark());
-
-    process.getBuiltinModule('fs').writeFileSync('./ast2.js', inputJS);
 
     const ast2 = parser.parse(inputJS, { sourceType: 'module' });
 
@@ -478,7 +479,7 @@ const buildMappedFile = (inputJS: string): string => {
         }
     }
 
-    console.log(babylonMap);
+    // console.log('babylonMap', babylonMap);
 
     traverse(ast2, {
         Identifier(path) {
@@ -596,7 +597,7 @@ const buildMappedFile = (inputJS: string): string => {
     }
 
     console.log('[ast2] executed property mappings (pass 1) in', benchmark());
-    console.log('propertyRenames', propertyRenames);
+    // console.log('propertyRenames', propertyRenames);
 
     // separate map for $VAR1, $VAR2, ..., $VAR20
     const parameterRenames: IdentifierMapping = {};
@@ -706,7 +707,7 @@ const buildMappedFile = (inputJS: string): string => {
         if (accurateName && constName !== accurateName) parameterRenames[constName] = accurateName;
     });
 
-    console.log('[ast2] processed parameterRenames', parameterRenames);
+    // console.log('[ast2] processed parameterRenames', parameterRenames);
 
     traverse(ast2, {
         ClassDeclaration(path) {
@@ -796,6 +797,8 @@ const buildMappedFile = (inputJS: string): string => {
             if (path.node.computed) return;
             if (!t.isIdentifier(path.node.property)) return;
 
+            if (t.isIdentifier(path.node.object) && path.node.object.name === 'window') return;
+
             const oldName = path.node.property.name;
             const newName = propertyRenames[oldName];
 
@@ -866,7 +869,7 @@ const buildMappedFile = (inputJS: string): string => {
                         const match = regex.exec(fullForLoopCode);
                         if (match && match[1]) {
                             switchRenames[match[1]] = name;
-                            console.log(`CommSwitch mapping: ${match[1]} -> ${name}`);
+                            // console.log(`CommSwitch mapping: ${match[1]} -> ${name}`);
                         }
                     }
 
@@ -890,7 +893,7 @@ const buildMappedFile = (inputJS: string): string => {
                             if ((t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) && parent.property === path.node && !parent.computed) return;
 
                             path.node.name = newName;
-                            console.log(`Remapped CommSwitch identifier: ${oldName} -> ${newName}`);
+                            // console.log(`remapped CommSwitch identifier: ${oldName} -> ${newName}`);
                         }
                     }, path.scope);
                 }
@@ -996,6 +999,8 @@ const buildMappedFile = (inputJS: string): string => {
         MemberExpression(path) {
             if (path.node.computed) return;
             if (!t.isIdentifier(path.node.property)) return;
+
+            if (t.isIdentifier(path.node.object) && path.node.object.name === 'window') return;
 
             const oldName = path.node.property.name;
             const newName = afterPropertyRenames[oldName];
@@ -1240,32 +1245,78 @@ const buildMappedFile = (inputJS: string): string => {
     });
 
     const forAST4 = generate(ast3, { retainLines: false, compact: false }).code;
-    console.log('completed finalCode generation in', benchmark());
+    console.log('[ast3] completed finalCode generation in', benchmark());
 
     const ast4 = parser.parse(forAST4, { sourceType: 'module' });
 
     console.log('[ast4] starting final cleanup w/ 0 syntax errors');
 
     traverse(ast4, {
-        VariableDeclaration(path) {
-            const constantsToRemove = new Map<string, t.Expression>();
+        BinaryExpression: {
+            exit(path) {
+                const { node } = path;
+                const op = node.operator;
 
-            path.node.declarations.forEach(decl => {
-                if (!t.isIdentifier(decl.id)) return;
+                // x | 0 fast path
+                if (op === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
+                    path.replaceWith(node.left);
+                    return;
+                }
 
-                const binding = path.scope.getBinding(decl.id.name);
-                if (!binding || !binding.constant) return;
+                // bail early before any function calls
+                const leftIsNum = t.isNumericLiteral(node.left);
+                const leftIsNeg = !leftIsNum && t.isUnaryExpression(node.left) && node.left.operator === '-' && t.isNumericLiteral(node.left.argument);
+                if (!leftIsNum && !leftIsNeg) return;
+
+                const rightIsNum = t.isNumericLiteral(node.right);
+                const rightIsNeg = !rightIsNum && t.isUnaryExpression(node.right) && node.right.operator === '-' && t.isNumericLiteral(node.right.argument);
+                if (!rightIsNum && !rightIsNeg) return;
+
+                const left = leftIsNum ? (node.left as t.NumericLiteral).value : -((node.left as t.UnaryExpression).argument as t.NumericLiteral).value;
+                const right = rightIsNum ? (node.right as t.NumericLiteral).value : -((node.right as t.UnaryExpression).argument as t.NumericLiteral).value;
+
+                let result: number | boolean | null = null;
+                switch (op) {
+                    case '+': result = left + right; break;
+                    case '-': result = left - right; break;
+                    case '*': result = left * right; break;
+                    case '/': result = left / right; break;
+                    case '%': result = left % right; break;
+                    case '**': result = left ** right; break;
+                    case '<': result = left < right; break;
+                    case '<=': result = left <= right; break;
+                    case '>': result = left > right; break;
+                    case '>=': result = left >= right; break;
+                    case '==': result = left == right; break;   // eslint-disable-line
+                    case '!=': result = left != right; break;   // eslint-disable-line
+                    case '===': result = left === right; break;
+                    case '!==': result = left !== right; break;
+                    default: return;
+                }
+
+                if (typeof result === 'number') path.replaceWith(t.numericLiteral(result));
+                else if (typeof result === 'boolean') path.replaceWith(t.booleanLiteral(result));
+            }
+        }
+    });
+
+    console.log('[ast4] folded binary expressions in', benchmark());
+
+    traverse(ast4, {
+        Scope(path) {
+            const toInline = new Map<string, t.Expression>();
+
+            for (const [name, binding] of Object.entries(path.scope.bindings)) {
+                if (!binding.constant) continue;
+                const decl = binding.path.node;
+                if (!t.isVariableDeclarator(decl) || !decl.init) continue;
 
                 let init = decl.init;
-                if (!init) return;
 
-                // evaluate simple math (like 1 + 1)
                 if (t.isBinaryExpression(init) &&
                     t.isNumericLiteral(init.left) &&
                     t.isNumericLiteral(init.right)) {
-
                     let result: number | null = null;
-
                     switch (init.operator) {
                         case '+': result = init.left.value + init.right.value; break;
                         case '-': result = init.left.value - init.right.value; break;
@@ -1273,121 +1324,36 @@ const buildMappedFile = (inputJS: string): string => {
                         case '/': result = init.left.value / init.right.value; break;
                         case '%': result = init.left.value % init.right.value; break;
                     }
-
                     if (result !== null) {
                         decl.init = t.numericLiteral(result);
-                        init = decl.init; // update init for future processing
+                        init = decl.init;
                     }
                 }
 
-                // mark null/boolean literals for potential removal
-                if ((t.isBooleanLiteral(init) || t.isNullLiteral(init))) {
-                    const actualRefs = binding.referencePaths.filter(ref => ref !== binding.path.get('id'));
+                const refs = binding.referencePaths;
 
-                    if (actualRefs.length === 0) {
-                        constantsToRemove.set(decl.id.name, init);
-                    } else {
-                        const allRefsAreInObjectProps = actualRefs.every(refPath => {
-                            const parent = refPath.parent;
-                            return t.isObjectProperty(parent) && parent.value === refPath.node;
-                        });
-
-                        if (allRefsAreInObjectProps) {
-                            constantsToRemove.set(decl.id.name, init);
-                        }
+                if (t.isBooleanLiteral(init) || t.isNullLiteral(init)) {
+                    if (refs.length === 0 || refs.every(r => t.isObjectProperty(r.parent) && r.parent.value === r.node)) {
+                        toInline.set(name, init);
                     }
+                } else if (t.isNumericLiteral(init) && refs.length > 0) {
+                    toInline.set(name, init);
                 }
-
-                // handle numeric literals for inlining (including evaluated ones)
-                if (t.isNumericLiteral(init)) {
-                    const actualRefs = binding.referencePaths.filter(ref => ref !== binding.path.get('id'));
-
-                    if (actualRefs.length > 0) constantsToRemove.set(decl.id.name, init);
-                }
-            });
-
-            // second pass: replace all references with actual values
-            for (const [varName, value] of constantsToRemove) {
-                const binding = path.scope.getBinding(varName);
-                if (!binding) continue;
-
-                binding.referencePaths.forEach(refPath => {
-                    if (refPath === binding.path.get('id')) return;
-
-                    if (t.isNullLiteral(value)) {
-                        refPath.replaceWith(t.nullLiteral());
-                    } else if (t.isBooleanLiteral(value)) {
-                        refPath.replaceWith(t.booleanLiteral(value.value));
-                    } else if (t.isNumericLiteral(value)) {
-                        refPath.replaceWith(t.numericLiteral(value.value));
-                    }
-                });
             }
 
-            // third pass: remove the declarations for these variables
-            path.node.declarations = path.node.declarations.filter(decl => {
-                if (!t.isIdentifier(decl.id)) return true;
-
-                const varName = decl.id.name;
-
-                if (constantsToRemove.has(varName)) {
-                    console.log(`Removing unused constant: ${varName}`);
-                    return false;
+            for (const [name, value] of toInline) {
+                const binding = path.scope.bindings[name];
+                for (const ref of binding.referencePaths) {
+                    if (t.isNullLiteral(value)) ref.replaceWith(t.nullLiteral());
+                    else if (t.isBooleanLiteral(value)) ref.replaceWith(t.booleanLiteral(value.value));
+                    else if (t.isNumericLiteral(value)) ref.replaceWith(t.numericLiteral(value.value));
                 }
-
-                return true;
-            });
-
-            if (path.node.declarations.length === 0) path.remove();
-        },
-        BinaryExpression(path) {
-            // remove `x | 0`
-            if (path.node.operator === '|' &&
-                t.isNumericLiteral(path.node.right) &&
-                path.node.right.value === 0) {
-                path.replaceWith(path.node.left);
-                return;
-            }
-
-            const getNumericValue = (node: t.Node): number | null => {
-                if (t.isNumericLiteral(node)) return node.value;
-                if (t.isUnaryExpression(node) && node.operator === '-' && t.isNumericLiteral(node.argument)) return -node.argument.value;
-                return null;
-            };
-
-            const leftValue = getNumericValue(path.node.left);
-            const rightValue = getNumericValue(path.node.right);
-
-            // evaluate constant math
-            if (leftValue !== null && rightValue !== null) {
-                let result: number | boolean | null = null;
-
-                switch (path.node.operator) {
-                    case '+': result = leftValue + rightValue; break;
-                    case '-': result = leftValue - rightValue; break;
-                    case '*': result = leftValue * rightValue; break;
-                    case '/': result = leftValue / rightValue; break;
-                    case '%': result = leftValue % rightValue; break;
-                    case '**': result = leftValue ** rightValue; break;
-                    case '<': result = leftValue < rightValue; break;
-                    case '<=': result = leftValue <= rightValue; break;
-                    case '>': result = leftValue > rightValue; break;
-                    case '>=': result = leftValue >= rightValue; break;
-                    // eslint-disable-next-line eqeqeq
-                    case '==': result = leftValue == rightValue; break;
-                    case '===': result = leftValue === rightValue; break;
-                    // eslint-disable-next-line eqeqeq
-                    case '!=': result = leftValue != rightValue; break;
-                    case '!==': result = leftValue !== rightValue; break;
-                }
-
-                if (result !== null) {
-                    if (typeof result === 'number') path.replaceWith(t.numericLiteral(result));
-                    else if (typeof result === 'boolean') path.replaceWith(t.booleanLiteral(result));
-                }
+                binding.path.remove();
             }
         }
     });
+
+    console.log('[ast4] inlined constants in', benchmark());
 
     const finalCode = generate(ast4, { retainLines: false, compact: false }).code;
 
