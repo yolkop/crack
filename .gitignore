@@ -6,5 +6,9 @@ bun.lock
 in
 out
 
+# workspace
+worksp/*.js
+worksp/*.diff
+
 # macos
 .DS_Store
