@@ -28,10 +28,11 @@ type Function = FunctionWithCode | FunctionWithRegex;
 interface Mappings {
     classes: Class[];
     functions: Function[];
-    objects: { name: string; hasKeys: string[]; keyCount?: number }[];
+    objects: { name: string; hasKeys: string[]; keyCount?: number, inline?: boolean }[];
     constants: { name: string; objectHasProps: string[] }[];
     variables: { name: string; regex: RegExp; after?: boolean; }[];
     props: { name: string; regex: RegExp; after?: boolean }[];
+    collapseBlacklists: string[];
     commCodes: Record<string, string>;
     commSwitch: { name: string; regex: RegExp }[];
 }
@@ -753,6 +754,7 @@ const mappings: Mappings = {
         { name: 'MeshBuilder', hasKeys: ['CreateTiledBox', 'ExtrudeShapeCustom', 'CreateGeodesic'] },
         { name: 'BABYLON_remapAttributeName', hasKeys: ['position2d', 'particle_texturemask'] },
         { name: 'BABYLON_Loaders_gltfTypeToBabylonType', hasKeys: ['float4', 'float4x4'] },
+        { name: 'BABYLON_ErrorCodes', hasKeys: ['MeshInvalidPositionsError', 'GLTFLoaderUnexpectedMagicError', 'ReadFileError'], inline: true },
 
         // shell
         { name: 'GameActions', hasKeys: ['reset', 'pause'] },
@@ -766,13 +768,13 @@ const mappings: Mappings = {
         { name: 'teamColors', hasKeys: ['textColor', 'summaryBackground'] },
         { name: 'ItemSearchSettings', hasKeys: ['isCaseSensitive', 'includeScore'] },
         { name: 'GameType', hasKeys: ['ffa', 'ctf', 'king'], keyCount: 4 },
-        { name: 'Team', hasKeys: ['blue', 'red'], keyCount: 2 },
-        { name: 'ChatFlag', hasKeys: ['none', 'pinned', 'team'] },
+        { name: 'Team', hasKeys: ['blue', 'red'], keyCount: 2, inline: true },
+        { name: 'ChatFlag', hasKeys: ['none', 'pinned', 'team'], inline: true },
         { name: 'CloseCode', hasKeys: ['gameNotFound', 'gameIdleExceeded'] },
         { name: 'Reward', hasKeys: ['perKill', 'perKillModTwo', 'Twitch'] },
         { name: 'ShellStreak', hasKeys: ['HardBoiled', 'OverHeal', 'MiniEgg'] },
-        { name: 'CHICKWINNER', hasKeys: ['dailyLimit', 'dailyCooldown'] },
-        { name: 'Slot', hasKeys: ['Primary', 'Secondary'], keyCount: 2 },
+        { name: 'CHICKWINNER', hasKeys: ['dailyLimit', 'dailyCooldown'], inline: true },
+        { name: 'Slot', hasKeys: ['Primary', 'Secondary'], keyCount: 2, inline: true },
         { name: 'ItemType2', hasKeys: ['Hat', 'Stamp'], keyCount: 6 },
         { name: 'CharClass', hasKeys: ['Soldier', 'Scrambler'], keyCount: 7 },
         { name: 'ABGroups', hasKeys: ['a', 'b', 'c'], keyCount: 3 },
@@ -904,7 +906,6 @@ const mappings: Mappings = {
         { name: 'BABYLON_RequestFileErrorCode', regex: /([A-Za-z0-9$_]+) = 4001;/ },
         { name: 'BABYLON_ReadFileErrorCode', regex: /([A-Za-z0-9$_]+) = 4002;/ },
         { name: 'BABYLON_MeshInvalidPositionsErrorCode', regex: /"Positions are required", ([A-Za-z0-9$_]+)\)/ },
-        { name: 'BABYLON_ErrorCodes', regex: /"Positions are required", ([A-Za-z0-9$_]+)\.MeshInvalidPositionsError\)/ },
         { name: 'BABYLON__result0', regex: /return !\(([A-Za-z0-9$_]+)\.min > / },
         { name: 'BABYLON__result1', regex: /&& !\(([A-Za-z0-9$_]+)\.min > / },
         { name: 'BABYLON_VertexDataMaterialInfo', regex: /= new ([A-Za-z0-9$_]+)\(\);\s*[a-z].indexStart = 0;/ },
@@ -1446,6 +1447,7 @@ const mappings: Mappings = {
         { name: 'dx_', regex: /this.dx = e\.([A-Za-z0-9$_]+);/ },
         { name: 'dy_', regex: /this.dy = e\.([A-Za-z0-9$_]+);/ },
         { name: 'lifetimeDeaths_', regex: /this.lifetimeDeaths = [a-z]\.([A-Za-z0-9$_]+)/ },
+        { name: 'lifetimeKills_', regex: /this.lifetimeKills = [a-z]\.([A-Za-z0-9$_]+)/ },
         { name: 'bestOverallStreak_', regex: /this.bestOverallStreak = [a-z]\.([A-Za-z0-9$_]+)/ },
         { name: 'gameData_', regex: /\.gameData = [a-z]\.([A-Za-z0-9$_]+)/ },
         { name: 'shield_', regex: /\.shield = [a-z]\.([A-Za-z0-9$_]+)/ },
@@ -1490,6 +1492,9 @@ const mappings: Mappings = {
         { name: 'CreateCylinder', regex: /static ([A-Za-z0-9$_]+)\([a-z]\) \{\s*throw BABYLON_CreateImportError\("cylinderBuilder"/, after: true },
         { name: 'runRenderLoop', regex: /([A-Za-z0-9$_]+)\([a-z]\) \{\s*if \(this._activeRenderLoops.indexOf\(/ },
         { name: 'shadowMap', regex: /.getShadowMap\(\)\?.([A-Za-z0-9$_]+)/ }
+    ],
+    collapseBlacklists: [
+        'buildId'
     ],
     commCodes
 }

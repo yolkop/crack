@@ -9,7 +9,6 @@ import mappings from '../mappings';
 import {
     addMapping,
     checkArrayOfObjects,
-    getClassProperties,
     getObjectKeys,
     sortClassMembers,
     type IdentifierMapping
@@ -146,7 +145,12 @@ const buildMappedFile = (inputJS: string): string => {
 
             // var X = class y {}
             if (t.isClassExpression(init)) {
-                const classProps = getClassProperties(init.body);
+                const classProps: string[] = [];
+
+                for (const item of init.body.body) {
+                    if (t.isClassMethod(item) && t.isIdentifier(item.key)) classProps.push(item.key.name);
+                    else if (t.isClassProperty(item) && t.isIdentifier(item.key)) classProps.push(item.key.name);
+                }
 
                 // check hasProps mappings
                 for (const mapping of mappings.classes) {
@@ -325,7 +329,7 @@ const buildMappedFile = (inputJS: string): string => {
 
     console.log('[ast1] ran function remapping in', benchmark());
 
-    // console.log('[ast1] functionRenames:', functionRenames);
+    const objectInlineMaps: Record<string, Record<string, t.StringLiteral | t.NumericLiteral>> = {};
 
     traverse(ast, {
         VariableDeclarator(path) {
@@ -345,6 +349,23 @@ const buildMappedFile = (inputJS: string): string => {
                         if (mapping.keyCount && keys.length !== mapping.keyCount) continue;
 
                         variableRenames[varName] = mapping.name;
+
+                        if (mapping.inline) {
+                            const inlineMap: Record<string, t.StringLiteral | t.NumericLiteral> = {};
+
+                            for (const prop of init.properties) {
+                                if (
+                                    t.isObjectProperty(prop) &&
+                                    t.isIdentifier(prop.key) &&
+                                    !prop.computed &&
+                                    (t.isStringLiteral(prop.value) || t.isNumericLiteral(prop.value))
+                                ) {
+                                    inlineMap[prop.key.name] = prop.value;
+                                }
+                            }
+
+                            objectInlineMaps[mapping.name] = inlineMap;
+                        }
                     }
                 }
             }
@@ -389,7 +410,7 @@ const buildMappedFile = (inputJS: string): string => {
     console.log('[ast1] renamed all identifiers in', benchmark());
 
     inputJS = generate(ast, { retainLines: false, compact: false }).code;
-    console.log('[ast1] generated in', benchmark());
+    console.log('[ast1] generated final code in', benchmark());
 
     const ast2 = parser.parse(inputJS, { sourceType: 'module' });
 
@@ -507,7 +528,7 @@ const buildMappedFile = (inputJS: string): string => {
         }
     });
 
-    console.log('[ast1] mapped babylon shaders in', benchmark());
+    console.log('[ast2] mapped babylon shaders in', benchmark());
 
     const ast2Map: IdentifierMapping = {};
 
@@ -840,8 +861,45 @@ const buildMappedFile = (inputJS: string): string => {
 
     console.log('[ast2] renamed identifiers in', benchmark());
 
+    traverse(ast2, {
+        MemberExpression(path) {
+            if (path.node.computed) {
+                if (!t.isStringLiteral(path.node.property)) return;
+                if (!t.isIdentifier(path.node.object)) return;
+
+                const varName = path.node.object.name;
+                const key = path.node.property.value;
+                const inlineMap = objectInlineMaps[varName];
+                if (!inlineMap || !(key in inlineMap)) return;
+
+                path.replaceWith(t.cloneNode(inlineMap[key]));
+            } else {
+                if (!t.isIdentifier(path.node.property)) return;
+                if (!t.isIdentifier(path.node.object)) return;
+
+                const varName = path.node.object.name;
+                const key = path.node.property.name;
+                const inlineMap = objectInlineMaps[varName];
+                if (!inlineMap || !(key in inlineMap)) return;
+
+                path.replaceWith(t.cloneNode(inlineMap[key]));
+            }
+        },
+        VariableDeclarator(path) {
+            if (!t.isIdentifier(path.node.id)) return;
+            if (!objectInlineMaps[path.node.id.name]) return;
+
+            const parentDecl = path.parentPath;
+            // @ts-expect-error if it compiles after i run this then i dont care im a genius
+            if (parentDecl.node.declarations.length === 1) parentDecl.remove();
+            else path.remove();
+        }
+    });
+
+    console.log('[ast2] inlined object properties in', benchmark());
+
     inputJS = generate(ast2, { retainLines: false, compact: false }).code;
-    console.log('completed JS codegen for 2nd pass in', benchmark());
+    console.log('[ast2] generated final code in', benchmark());
 
     const ast3 = parser.parse(inputJS, { sourceType: 'module' });
 
@@ -1099,29 +1157,6 @@ const buildMappedFile = (inputJS: string): string => {
             // rm the entire block if it has no declarations left
             if (path.node.declarations.length === 0) path.remove();
         },
-        BinaryExpression(path) {
-            if (path.node.operator === '|' &&
-                t.isNumericLiteral(path.node.right) &&
-                path.node.right.value === 0) {
-                // replace `x | 0` with just `x`
-                path.replaceWith(path.node.left);
-            }
-
-            if (t.isNumericLiteral(path.node.left) && t.isNumericLiteral(path.node.right)) {
-                let result: number | null = null;
-
-                switch (path.node.operator) {
-                    case '+': result = path.node.left.value + path.node.right.value; break;
-                    case '-': result = path.node.left.value - path.node.right.value; break;
-                    case '*': result = path.node.left.value * path.node.right.value; break;
-                    case '/': result = path.node.left.value / path.node.right.value; break;
-                    case '%': result = path.node.left.value % path.node.right.value; break;
-                    case '**': result = path.node.left.value ** path.node.right.value; break;
-                }
-
-                if (result !== null) path.replaceWith(t.numericLiteral(result));
-            }
-        },
         IfStatement(path) {
             const test = path.get('test');
 
@@ -1255,28 +1290,26 @@ const buildMappedFile = (inputJS: string): string => {
         BinaryExpression: {
             exit(path) {
                 const { node } = path;
-                const op = node.operator;
 
-                // x | 0 fast path
-                if (op === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
+                if (node.operator === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
                     path.replaceWith(node.left);
                     return;
                 }
 
-                // bail early before any function calls
-                const leftIsNum = t.isNumericLiteral(node.left);
-                const leftIsNeg = !leftIsNum && t.isUnaryExpression(node.left) && node.left.operator === '-' && t.isNumericLiteral(node.left.argument);
-                if (!leftIsNum && !leftIsNeg) return;
+                const getNum = (n: t.Expression): number | null => {
+                    if (t.isNumericLiteral(n)) return n.value;
+                    if (t.isUnaryExpression(n) && n.operator === '-' && t.isNumericLiteral(n.argument)) return -n.argument.value;
+                    return null;
+                };
 
-                const rightIsNum = t.isNumericLiteral(node.right);
-                const rightIsNeg = !rightIsNum && t.isUnaryExpression(node.right) && node.right.operator === '-' && t.isNumericLiteral(node.right.argument);
-                if (!rightIsNum && !rightIsNeg) return;
+                if (node.left.type === 'PrivateName') return;
 
-                const left = leftIsNum ? (node.left as t.NumericLiteral).value : -((node.left as t.UnaryExpression).argument as t.NumericLiteral).value;
-                const right = rightIsNum ? (node.right as t.NumericLiteral).value : -((node.right as t.UnaryExpression).argument as t.NumericLiteral).value;
+                const left = getNum(node.left);
+                const right = getNum(node.right);
+                if (left === null || right === null) return;
 
                 let result: number | boolean | null = null;
-                switch (op) {
+                switch (node.operator) {
                     case '+': result = left + right; break;
                     case '-': result = left - right; break;
                     case '*': result = left * right; break;
@@ -1332,12 +1365,11 @@ const buildMappedFile = (inputJS: string): string => {
 
                 const refs = binding.referencePaths;
 
-                if (t.isBooleanLiteral(init) || t.isNullLiteral(init)) {
-                    if (refs.length === 0 || refs.every(r => t.isObjectProperty(r.parent) && r.parent.value === r.node)) {
-                        toInline.set(name, init);
+                if (!mappings.collapseBlacklists.includes(name)) {
+                    if (t.isBooleanLiteral(init) || t.isNullLiteral(init) || t.isNumericLiteral(init) || t.isStringLiteral(init)) {
+                        if (refs.length > 0) toInline.set(name, init);
+                        else if (name.includes('__unusedVar_')) binding.path.remove();
                     }
-                } else if (t.isNumericLiteral(init) && refs.length > 0) {
-                    toInline.set(name, init);
                 }
             }
 
@@ -1347,6 +1379,7 @@ const buildMappedFile = (inputJS: string): string => {
                     if (t.isNullLiteral(value)) ref.replaceWith(t.nullLiteral());
                     else if (t.isBooleanLiteral(value)) ref.replaceWith(t.booleanLiteral(value.value));
                     else if (t.isNumericLiteral(value)) ref.replaceWith(t.numericLiteral(value.value));
+                    else if (t.isStringLiteral(value)) ref.replaceWith(t.stringLiteral(value.value));
                 }
                 binding.path.remove();
             }

@@ -54,17 +54,6 @@ export const sortClassMembers = (classBody: t.ClassBody): void => {
         : [...orderedAccessors, ...methods];
 };
 
-export const getClassProperties = (classBody: t.ClassBody): string[] => {
-    const props: string[] = [];
-
-    for (const item of classBody.body) {
-        if (t.isClassMethod(item) && t.isIdentifier(item.key)) props.push(item.key.name);
-        else if (t.isClassProperty(item) && t.isIdentifier(item.key)) props.push(item.key.name);
-    }
-
-    return props;
-}
-
 export const getObjectKeys = (node: t.ObjectExpression): string[] => node.properties
     .filter(p => t.isObjectProperty(p) && t.isIdentifier(p.key))
     .map(p => (p as t.ObjectProperty).key)

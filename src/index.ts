@@ -36,6 +36,6 @@ if (process.argv[4]) types.forEach((type) => type.forEach((item) => {
 
 const outDir = path.join(import.meta.dirname, '..', 'out');
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
-fs.writeFileSync(path.join(outDir, Date.now() + '.js'), remapResult);
+fs.writeFileSync(path.join(outDir, path.basename(process.argv[2])), remapResult);
 
 console.log('completed in', ((Date.now() - start) / 1000).toFixed(3) + 's')

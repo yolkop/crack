@@ -3,7 +3,7 @@ import path from 'node:path';
 
 const pullFile = async (p: string) => {
     if (p.startsWith('/') || p.startsWith('./') || p.startsWith('../')) {
-        const filePath = path.join(import.meta.dirname, '..', p);
+        const filePath = path.resolve(p);
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) return fs.readFileSync(filePath, 'utf8');
         else throw new Error(`file not found on local FS: ${p}`);
     } else {
