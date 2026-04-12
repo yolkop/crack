@@ -29,6 +29,15 @@
     6. `bun . {path or link to JS file} {path or link to commcode file}
     7. wait like 2 minutes
     8. observe out dir
+    7. profit
+
+    INJECTION INSTRUCTIONS:
+    1. do the above usage instructions 1-4
+    2. save the shellshock.js file to `in/prod.js`
+    3. do the above usage instructions 6-7
+    4. import http://localhost:6056/script.user.js into your userscript manager
+    5. load up the game on its main url
+    6. profit
 
     ---
 

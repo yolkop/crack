@@ -7,7 +7,6 @@ in
 out
 
 # workspace
-worksp/*.js
 worksp/*.diff
 
 # macos
