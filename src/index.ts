@@ -15,7 +15,7 @@ import mappings from './mappings';
 import pullFile from './pull';
 
 const js: string = await pullFile(process.argv[2]);
-const remapResult = remap(js);
+const remapResult = await remap(js);
 
 const types = [
     mappings.classes,

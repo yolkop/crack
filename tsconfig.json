@@ -7,7 +7,6 @@
         "module": "esnext",
         "moduleResolution": "bundler",
         "outDir": "dist",
-        "rootDir": "src",
         "noEmit": true,
         "strict": true,
         "esModuleInterop": true,
@@ -20,7 +19,8 @@
         ]
     },
     "include": [
-        "src/**/*.ts"
+        "src/**/*.ts",
+        "worksp/**/*.ts"
     ],
     "exclude": [
         "node_modules/**"
