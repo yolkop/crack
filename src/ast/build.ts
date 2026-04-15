@@ -32,11 +32,11 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log('[pre] inputJS size:', inputJS.length);
 
     const numCores = os.cpus().length;
-    const encodedJS = new TextEncoder().encode(inputJS);
-    const sab = new SharedArrayBuffer(encodedJS.byteLength);
-    new Uint8Array(sab).set(encodedJS);
+    const ast1Encoded = new TextEncoder().encode(inputJS);
+    const ast1Buffer = new SharedArrayBuffer(ast1Encoded.byteLength);
+    new Uint8Array(ast1Buffer).set(ast1Encoded);
 
-    const beforeRegexWork = [
+    const ast1RegexWork = [
         ...mappings.variables.filter(m => m.regex && !m.after).map(m => ({
             kind: 'variable' as const,
             name: m.name,
@@ -57,7 +57,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         })),
     ];
 
-    const afterRegexWork = [
+    const ast2RegexWork = [
         ...mappings.variables.filter(m => m.regex && m.after).map(m => ({
             kind: 'variable' as const,
             name: m.name,
@@ -69,7 +69,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             name: m.name,
             regex: (m as any).regex.source,
             after: true,
-        })),
+        }))
+    ];
+
+    const ast3RegexWork = [
         ...mappings.props.filter(m => m.regex && m.after).map(m => ({
             kind: 'prop' as const,
             name: m.name,
@@ -78,32 +81,24 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         })),
     ];
 
-    const beforeChunkSize = Math.ceil(beforeRegexWork.length / numCores);
-    const beforeResults = await Promise.all(
+    const ast1ChunkSize = Math.ceil(ast1RegexWork.length / numCores);
+    const ast1Promise = Promise.all(
         Array.from({ length: numCores }, (_, i) => {
-            const chunk = beforeRegexWork.slice(i * beforeChunkSize, (i + 1) * beforeChunkSize);
+            const chunk = ast1RegexWork.slice(i * ast1ChunkSize, (i + 1) * ast1ChunkSize);
             return new Promise(resolve => {
-                const w = new Worker(path.join(import.meta.dirname, 'worker.ts'), { workerData: { sab, chunk } });
+                const w = new Worker(path.join(import.meta.dirname, 'worker.ts'), { workerData: { sab: ast1Buffer, chunk } });
                 w.addListener('message', resolve);
             });
         })
-    ) as { variableRenames: Record<string, string>, functionRenames: Record<string, string>, propertyRenames: Record<string, string> }[];
+    ) as Promise<{ variableRenames: Record<string, string>, functionRenames: Record<string, string>, propertyRenames: Record<string, string> }[]>;
+
+    const ast = parser.parse(inputJS, { sourceType: 'module' });
+
+    console.log('[ast1] parsed in', benchmark());
 
     const variableRenames: Record<string, string> = {};
     const functionRenames: Record<string, string> = {};
     const propertyRenames: Record<string, string> = {};
-
-    for (const result of beforeResults) {
-        Object.assign(variableRenames, result.variableRenames);
-        Object.assign(functionRenames, result.functionRenames);
-        Object.assign(propertyRenames, result.propertyRenames);
-    }
-
-    console.log('[pre] extracted vars in', benchmark());
-
-    const ast = parser.parse(inputJS, { sourceType: 'module' });
-
-    console.log('[ast1] parsed! starting compilation in', benchmark());
 
     let commCodeVarName: string | null = null;
 
@@ -152,19 +147,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         });
     } else console.warn('failed to find CommCode variable name');
 
-    console.log('[ast1] replaced CommCode mappings in', benchmark());
+    console.log('[ast1] remapped CommCode in', benchmark());
 
     traverse(ast, {
-        ClassExpression(path) {
-            sortClassMembers(path.node.body);
-        },
-        ClassDeclaration(path) {
-            sortClassMembers(path.node.body);
-        },
         VariableDeclarator(path) {
-            if (path.node.init && t.isClassExpression(path.node.init))
-                sortClassMembers(path.node.init.body);
-
             if (!t.isIdentifier(path.node.id)) return;
 
             const varName = path.node.id.name;
@@ -291,12 +277,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                     variableRenames[path.node.left.object.name] = `BABYLON_${path.node.right.value}`;
                 }
             } catch { }
-        }
-    });
-
-    console.log('[ast1] ran auto babylon & class remapping in', benchmark());
-
-    traverse(ast, {
+        },
         FunctionDeclaration(path) {
             if (!t.isIdentifier(path.node.id)) return;
 
@@ -320,7 +301,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast1] ran function remapping in', benchmark());
+    console.log('[ast1] crawled auto babylon & hasCodes in', benchmark());
 
     const objectInlineMaps: Record<string, Record<string, t.StringLiteral | t.NumericLiteral>> = {};
 
@@ -371,7 +352,17 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast1] processed objects/arrays in', benchmark());
+    console.log('[ast1] remapped objects/arrays in', benchmark());
+
+    const ast1Results = await ast1Promise;
+
+    for (const result of ast1Results) {
+        Object.assign(variableRenames, result.variableRenames);
+        Object.assign(functionRenames, result.functionRenames);
+        Object.assign(propertyRenames, result.propertyRenames);
+    }
+
+    console.log('[ast1] got regex results in', benchmark());
 
     traverse(ast, {
         Identifier(path) {
@@ -391,21 +382,21 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast1] renamed all identifiers in', benchmark());
+    console.log('[ast1] remapped all befores in', benchmark());
 
     inputJS = generate(ast, { retainLines: false, compact: false }).code;
     console.log('[ast1] generated final code in', benchmark());
 
-    const encoded2 = new TextEncoder().encode(inputJS);
-    const sab2 = new SharedArrayBuffer(encoded2.byteLength);
-    new Uint8Array(sab2).set(encoded2);
+    const ast2Encoded = new TextEncoder().encode(inputJS);
+    const ast2Buffer = new SharedArrayBuffer(ast2Encoded.byteLength);
+    new Uint8Array(ast2Buffer).set(ast2Encoded);
 
-    const afterChunkSize = Math.ceil(afterRegexWork.length / numCores);
-    const afterRegexPromise = Promise.all(
+    const ast2ChunkSize = Math.ceil(ast2RegexWork.length / numCores);
+    const ast2Promise = Promise.all(
         Array.from({ length: numCores }, (_, i) => {
-            const chunk = afterRegexWork.slice(i * afterChunkSize, (i + 1) * afterChunkSize);
+            const chunk = ast2RegexWork.slice(i * ast2ChunkSize, (i + 1) * ast2ChunkSize);
             return new Promise(resolve => {
-                const w = new Worker(path.join(import.meta.dirname, 'worker.ts'), { workerData: { sab: sab2, chunk } });
+                const w = new Worker(path.join(import.meta.dirname, 'worker.ts'), { workerData: { sab: ast2Buffer, chunk } });
                 w.addListener('message', resolve);
             });
         })
@@ -498,6 +489,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     }
 
+    console.log('[ast2] identified babylon shaders in', benchmark());
+
     traverse(ast2, {
         Identifier(path) {
             const oldName = path.node.name;
@@ -521,15 +514,15 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast2] mapped babylon shaders in', benchmark());
 
-    const afterResults = await afterRegexPromise;
+    const ast2Results = await ast2Promise;
 
     const ast2Map: IdentifierMapping = {};
-    for (const result of afterResults) {
+    for (const result of ast2Results) {
         Object.assign(ast2Map, result.variableRenames);
         Object.assign(ast2Map, result.functionRenames);
     }
 
-    console.log('[ast2] executed variable mappings (pass 2) in', benchmark());
+    console.log('[ast2] identified variable mappings in', benchmark());
 
     traverse(ast2, {
         FunctionDeclaration(path) {
@@ -574,7 +567,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast2] renamed identifiers in', benchmark());
+    console.log('[ast2] remapped after functions & variables in', benchmark());
 
     // separate map for $VAR1, $VAR2, ..., $VAR20
     const parameterRenames: IdentifierMapping = {};
@@ -802,7 +795,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast2] renamed identifiers in', benchmark());
+    console.log('[ast2] renamed babylon & properties in', benchmark());
 
     traverse(ast2, {
         MemberExpression(path) {
@@ -849,6 +842,21 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     const ast3 = ast2;
 
     console.log('[ast3] starting w/ 0 syntax errors');
+
+    const ast3Encoded = new TextEncoder().encode(inputJS);
+    const ast3Buffer = new SharedArrayBuffer(ast3Encoded.byteLength);
+    new Uint8Array(ast3Buffer).set(ast3Encoded);
+
+    const ast3ChunkSize = Math.ceil(ast3RegexWork.length / numCores);
+    const ast3Promise = Promise.all(
+        Array.from({ length: numCores }, (_, i) => {
+            const chunk = ast3RegexWork.slice(i * ast3ChunkSize, (i + 1) * ast3ChunkSize);
+            return new Promise(resolve => {
+                const w = new Worker(path.join(import.meta.dirname, 'worker.ts'), { workerData: { sab: ast3Buffer, chunk } });
+                w.addListener('message', resolve);
+            });
+        })
+    ) as Promise<{ propertyRenames: Record<string, string> }[]>;
 
     const switchRegexes = mappings.commSwitch.filter(m => m.regex).map(m => ({
         name: m.name,
@@ -906,19 +914,11 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast3] processed comm switch mappings in', benchmark());
 
-    const afterProps = mappings.props.filter(m => m.regex && m.after).map(m => ({
-        name: m.name,
-        regex: new RegExp(m.regex!.source, 'g')
-    }));
-
     const afterPropertyRenames: IdentifierMapping = {};
+    const ast3Result = await ast3Promise;
+    Object.assign(afterPropertyRenames, ...ast3Result.map(r => r.propertyRenames));
 
-    for (const { name, regex } of afterProps) {
-        regex.lastIndex = 0;
-        const match = regex.exec(inputJS);
-
-        if (match && match[1]) afterPropertyRenames[match[1]] = name;
-    }
+    console.log('[ast3] identified property renames in', benchmark());
 
     traverse(ast3, {
         ClassDeclaration(path) {
@@ -1032,7 +1032,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast3] finished ALL renames in', benchmark());
+    console.log('[ast3] remapped after property renames in', benchmark());
 
     traverse(ast3, {
         ClassExpression(path) {
@@ -1224,14 +1224,9 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    const forAST4 = generate(ast3, { retainLines: false, compact: false }).code;
-    console.log('[ast3] completed finalCode generation in', benchmark());
+    console.log('[ast3] performed general cleanups in', benchmark());
 
-    const ast4 = parser.parse(forAST4, { sourceType: 'module' });
-
-    console.log('[ast4] starting final cleanup w/ 0 syntax errors');
-
-    traverse(ast4, {
+    traverse(ast3, {
         BinaryExpression: {
             exit(path) {
                 const { node } = path;
@@ -1278,9 +1273,9 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast4] folded binary expressions in', benchmark());
+    console.log('[ast3] folded binary expressions in', benchmark());
 
-    traverse(ast4, {
+    traverse(ast3, {
         Scope(path) {
             const toInline = new Map<string, t.Expression>();
 
@@ -1331,11 +1326,11 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log('[ast4] inlined constants in', benchmark());
+    console.log('[ast3] inlined constants in', benchmark());
 
-    const finalCode = generate(ast4, { retainLines: false, compact: false }).code;
+    const finalCode = generate(ast3, { retainLines: false, compact: false }).code;
 
-    console.log('fully done in', (((Date.now() - start) / 1000).toFixed(3) + 's'));
+    console.log('AST finished in', (((Date.now() - start) / 1000).toFixed(3) + 's'));
 
     return finalCode;
 }
