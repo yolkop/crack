@@ -129,10 +129,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                         }
                     }
                 }
-            }
-        });
-
-        traverse(ast, {
+            },
             MemberExpression(path) {
                 if (!t.isIdentifier(path.node.object)) return;
                 if (path.node.object.name !== commCodeVarName) return;
