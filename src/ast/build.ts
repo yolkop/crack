@@ -1060,10 +1060,17 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
                 const init = decl.init;
                 if (t.isNumericLiteral(init)) {
-                    const actualRefs = binding.referencePaths.filter(ref => ref !== binding.path.get('id'));
+                    const actualRefs = binding.referencePaths.filter(ref => {
+                        if (ref === binding.path.get('id') || !('name' in decl.id)) return false;
+                        const refBinding = ref.scope.getBinding(decl.id.name);
+                        return refBinding === binding;
+                    });
 
-                    const canInline = actualRefs.every(refPath => {
-                        const parent = refPath.parent;
+                    const usedAsCallee = actualRefs.some(ref => (t.isCallExpression(ref.parent) || t.isOptionalCallExpression(ref.parent)) && ref.parent.callee === ref.node);
+                    if (usedAsCallee) return;
+
+                    const canInline = actualRefs.every(ref => {
+                        const parent = ref.parent;
                         if (t.isBinaryExpression(parent) && parent.operator === '|' &&
                             t.isNumericLiteral(parent.right) && parent.right.value === 0) {
                             return false;
@@ -1080,8 +1087,16 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                 const binding = path.scope.getBinding(varName);
                 if (!binding) continue;
 
-                binding.referencePaths.forEach(refPath => {
+                const safeRefs = binding.referencePaths.filter(ref => {
+                    if (ref === binding.path.get('id')) return false;
+                    if (!('id' in binding.path.node) || !binding.path.node.id || !('name' in binding.path.node.id)) return false;
+                    const refBinding = ref.scope.getBinding(varName);
+                    return refBinding === binding;
+                });
+
+                safeRefs.forEach(refPath => {
                     if (refPath === binding.path.get('id')) return;
+                    if (path.node.kind === 'let' || path.node.kind === 'const') return;
 
                     if (t.isNullLiteral(value)) refPath.replaceWith(t.nullLiteral());
                     else if (t.isBooleanLiteral(value)) refPath.replaceWith(t.booleanLiteral(value.value));
@@ -1281,6 +1296,17 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                 const decl = binding.path.node;
                 if (!t.isVariableDeclarator(decl) || !decl.init) continue;
 
+                const isForLoopVar = binding.path.parentPath?.isForStatement() ||
+                    binding.path.parentPath?.isForInStatement() ||
+                    binding.path.parentPath?.isForOfStatement();
+
+                if (isForLoopVar) continue;
+
+                const usedAsCallee = binding.referencePaths.some(ref =>
+                    t.isCallExpression(ref.parent) && ref.parent.callee === ref.node
+                );
+                if (usedAsCallee) continue;
+
                 let init = decl.init;
 
                 if (t.isBinaryExpression(init) &&
@@ -1313,6 +1339,11 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             for (const [name, value] of toInline) {
                 const binding = path.scope.bindings[name];
                 for (const ref of binding.referencePaths) {
+                    if (ref === binding.path.get('id')) continue;
+
+                    const refBinding = ref.scope.getBinding(name);
+                    if (refBinding !== binding) continue;
+
                     if (t.isNullLiteral(value)) ref.replaceWith(t.nullLiteral());
                     else if (t.isBooleanLiteral(value)) ref.replaceWith(t.booleanLiteral(value.value));
                     else if (t.isNumericLiteral(value)) ref.replaceWith(t.numericLiteral(value.value));
