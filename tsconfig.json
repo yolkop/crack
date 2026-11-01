@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "lib": [
+            "ESNext"
+        ],
+        "target": "esnext",
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "outDir": "dist",
+        "noEmit": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "strictPropertyInitialization": false,
+        "forceConsistentCasingInFileNames": true,
+        "types": ["bun"],
+        "typeRoots": [
+            "./node_modules/@types",
+            "./src/types.d.ts"
+        ]
+    },
+    "include": [
+        "src/**/*.ts",
+        "worksp/**/*.ts"
+    ],
+    "exclude": [
+        "node_modules/**"
+    ]
+}

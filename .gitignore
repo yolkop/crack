@@ -1,0 +1,17 @@
+# modules
+node_modules
+bun.lock
+
+# files
+in
+out
+
+# workspace
+worksp/**/*.diff
+worksp/**/*.json
+worksp/**/*.md
+worksp/**/*.report
+worksp/**/*.sh
+
+# macos
+.DS_Store
