@@ -86,7 +86,7 @@ const mappings: Mappings = {
         { name: 'BABYLON_Stage', hasProps: ['registerStep', 'Create', 'clear'], constructorParams: ['items'], methodParams: { registerStep: ['index', 'component', 'action'], clear: [] } },
         { name: 'BABYLON_InternalNodeDataInfo', constructorHasCode: '_onClonedObservable = new ' },
         { name: 'BABYLON_Buffer', constructorHasCode: '._isAlreadyOwned = false;', constructorParams: ['engine', 'data2', 'updatable', 'stride', 'postponeInternalCreation', 'instanced', 'useBytes'], methodParams: { createVertexBuffer: ['kind', 'offset', 'size', 'stride', 'instanced', 'useBytes'], isUpdatable: [], getData: [], getBuffer: [], getStrideSize: [], create: ['data2'], _rebuild: [], update: ['data2'], updateDirectly: ['data2', 'offset', 'vertexCount', 'useBytes'], dispose: [] } },
-        { name: 'BABYLON_IntersectionInfo', constructorHasCode: '.faceId = 0;', constructorParams: ['babylon$bu', 'babylon$bv', 'distance'] },
+        { name: 'BABYLON_IntersectionInfo', constructorHasCode: '.faceId = 0;', constructorParams: ['barycentricU', 'barycentricV', 'distance'] },
         { name: 'BABYLON_MathHelpers', hasProps: ['extractMinAndMaxIndexed', 'extractMinAndMax'] },
         { name: 'BABYLON_DrawWrapper', constructorHasCode: '._forceRebindOnNextCall = true;' },
         { name: 'BABYLON_SerializationHelper', hasProps: ['ParseProperties', 'AppendSerializedAnimations'], constructorParams: [] },

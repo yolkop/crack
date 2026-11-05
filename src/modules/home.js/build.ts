@@ -1,9 +1,9 @@
 import generate from '@babel/generator';
 import * as parser from '@babel/parser';
-import traverse, { type NodePath } from '@babel/traverse';
+import traverse, { type Binding, type NodePath, type Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 
-import mappings from './mappings';
+import mappings, { type QrFunctionSpec } from './mappings';
 import { addMapping, type IdentifierMapping } from '../../util/ast';
 
 // dark-overlay -> DarkOverlay
@@ -905,6 +905,238 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             renameLeadingParams(fnPath, names);
         }
     });
+
+    let qrTempIdx = 0;
+    let qrRenameCount = 0;
+
+    const getBindingUsages = (binding: Binding): NodePath[] => [...binding.referencePaths, ...binding.constantViolations];
+
+    const isQrRenameSafe = (binding: Binding, newName: string): boolean => {
+        const scope = binding.scope;
+        if (Object.hasOwn(scope.getProgramParent().globals, newName)) return false;
+
+        const existing = scope.getBinding(newName);
+        if (existing && existing.scope !== scope && getBindingUsages(existing).some(usage => usage.isDescendant(scope.path))) return false;
+
+        return getBindingUsages(binding).every(usage => {
+            for (let s: Scope | null = usage.scope; s && s !== scope; s = s.parent) if (s.hasOwnBinding(newName)) return false;
+            return true;
+        });
+    };
+
+    const renameQrBatch = (scope: Scope, pairs: [string, string][]) => {
+        const seen = new Set<string>();
+        let candidates: { binding: Binding; newName: string }[] = [];
+
+        for (const [oldName, newName] of pairs) {
+            const binding = scope.getOwnBinding(oldName);
+            if (!binding || oldName === newName || seen.has(newName)) continue;
+            if (!isQrRenameSafe(binding, newName)) continue;
+
+            seen.add(newName);
+            candidates.push({ binding, newName });
+        }
+
+        for (let changed = true; changed;) {
+            changed = false;
+            candidates = candidates.filter(candidate => {
+                const own = scope.getOwnBinding(candidate.newName);
+                const ok = !own || candidates.some(other => other.binding === own);
+                if (!ok) changed = true;
+                return ok;
+            });
+        }
+
+        const temps = candidates.map(candidate => {
+            const temp = `__qr${qrTempIdx++}`;
+            scope.rename(candidate.binding.identifier.name, temp);
+            return temp;
+        });
+
+        candidates.forEach((candidate, i) => {
+            scope.rename(temps[i], candidate.newName);
+            qrRenameCount++;
+        });
+    };
+
+    const unwrapQrFunction = (path: NodePath<t.Node | null | undefined> | undefined): NodePath<t.Function> | null => {
+        if (!path || !path.node) return null;
+        if (path.isFunction()) return path;
+        if (!path.isCallExpression()) return null;
+
+        const callee = path.get('callee');
+        return callee.isFunction() ? callee : null;
+    };
+
+    const getBodyDeclarators = (fnPath: NodePath<t.Function>): NodePath<t.VariableDeclarator>[] => {
+        const body = fnPath.get('body') as NodePath<t.Node>;
+        if (!body.isBlockStatement()) return [];
+
+        return body.get('body').flatMap(stmt => stmt.isVariableDeclaration() ? stmt.get('declarations') : []);
+    };
+
+    const getMemberFunctions = (fnPath: NodePath<t.Function>): Map<string, NodePath<t.Function>> => {
+        const members = new Map<string, NodePath<t.Function>>();
+        const body = fnPath.get('body') as NodePath<t.Node>;
+        if (!body.isBlockStatement()) return members;
+
+        const addObject = (objPath: NodePath<t.ObjectExpression>) => {
+            for (const prop of objPath.get('properties')) {
+                if (prop.isObjectMethod() && !prop.node.computed && t.isIdentifier(prop.node.key)) members.set(prop.node.key.name, prop as NodePath<t.Function>);
+                else if (prop.isObjectProperty() && !prop.node.computed && t.isIdentifier(prop.node.key)) {
+                    const value = prop.get('value');
+                    if (value.isFunction()) members.set(prop.node.key.name, value);
+                }
+            }
+        };
+
+        for (const stmt of body.get('body')) {
+            if (stmt.isExpressionStatement()) {
+                const expr = stmt.get('expression');
+                if (!expr.isAssignmentExpression({ operator: '=' })) continue;
+
+                const { left } = expr.node;
+                if (!t.isMemberExpression(left) || left.computed || !t.isIdentifier(left.property)) continue;
+
+                const right = expr.get('right');
+                if (right.isFunction()) members.set(left.property.name, right);
+            } else if (stmt.isVariableDeclaration()) {
+                for (const declarator of stmt.get('declarations')) {
+                    const init = declarator.get('init');
+                    if (init.isObjectExpression()) addObject(init);
+                }
+            } else if (stmt.isReturnStatement()) {
+                const argument = stmt.get('argument');
+                if (argument.isObjectExpression()) addObject(argument);
+            }
+        }
+
+        return members;
+    };
+
+    const applyQrSpec = (fnPath: NodePath<t.Function>, spec: QrFunctionSpec) => {
+        const pairs: [string, string][] = [];
+        const paramNames = spec.params ?? [];
+
+        (fnPath.get('params') as NodePath<t.Node>[]).slice(0, paramNames.length).forEach((paramPath, i) => {
+            const target: NodePath<t.Node> = paramPath.isAssignmentPattern() ? paramPath.get('left') : paramPath;
+            if (target.isIdentifier()) pairs.push([target.node.name, paramNames[i]]);
+        });
+
+        const declarators = getBodyDeclarators(fnPath);
+
+        (spec.locals ?? []).forEach((name, i) => {
+            const declarator = declarators[i];
+            if (declarator && t.isIdentifier(declarator.node.id)) pairs.push([declarator.node.id.name, name]);
+        });
+
+        renameQrBatch(fnPath.scope, pairs);
+
+        if (spec.methods) {
+            const members = getMemberFunctions(fnPath);
+
+            for (const [name, methodSpec] of Object.entries(spec.methods)) {
+                const member = members.get(name);
+                if (member) applyQrSpec(member, methodSpec);
+                else console.log(`[home.js] qrcode method '${name}' was not found`);
+            }
+        }
+
+        for (const [name, innerSpec] of Object.entries(spec.inner ?? {})) {
+            const declarator = getBodyDeclarators(fnPath).find(d => t.isIdentifier(d.node.id) && d.node.id.name === name);
+            const innerFn = unwrapQrFunction(declarator?.get('init'));
+
+            if (innerFn) applyQrSpec(innerFn, innerSpec);
+            else console.log(`[home.js] qrcode inner function '${name}' was not found`);
+        }
+    };
+
+    const qrConfig = mappings.qrcode;
+
+    const qrCandidates = [...topLevelVars.values()]
+        .filter(declPath => !!unwrapQrFunction(declPath.get('init')))
+        .map(declPath => ({ declPath, source: inputJS.slice(declPath.node.init!.start!, declPath.node.init!.end!) }));
+
+    const qrClaimed = new Set<NodePath>();
+    const qrMissing: string[] = [];
+    const qrMatches: { declPath: NodePath<t.VariableDeclarator>; qrModule: (typeof qrConfig.modules)[number] }[] = [];
+
+    for (const qrModule of qrConfig.modules) {
+        const found = qrCandidates.find(candidate =>
+            !qrClaimed.has(candidate.declPath) &&
+            qrModule.contains.every(needle => candidate.source.includes(needle)) &&
+            !(qrModule.notContains ?? []).some(needle => candidate.source.includes(needle))
+        );
+
+        if (!found) {
+            qrMissing.push(qrModule.name);
+            continue;
+        }
+
+        qrClaimed.add(found.declPath);
+        qrMatches.push({ declPath: found.declPath, qrModule });
+    }
+
+    for (const { declPath, qrModule } of qrMatches) {
+        renameQrBatch(declPath.scope, [[(declPath.node.id as t.Identifier).name, qrModule.name]]);
+
+        const currentName = (declPath.node.id as t.Identifier).name;
+        const fnPath = unwrapQrFunction(declPath.get('init'));
+        if (fnPath) applyQrSpec(fnPath, qrModule);
+
+        const block = declPath.parentPath?.parentPath;
+
+        if (qrModule.statics && block?.isBlockStatement()) {
+            for (const stmt of block.get('body')) {
+                if (!stmt.isExpressionStatement()) continue;
+
+                const expr = stmt.get('expression');
+                if (!expr.isAssignmentExpression({ operator: '=' })) continue;
+
+                const { left } = expr.node;
+                if (!t.isMemberExpression(left) || left.computed || !t.isIdentifier(left.object, { name: currentName }) || !t.isIdentifier(left.property)) continue;
+
+                const staticSpec = qrModule.statics[left.property.name];
+                const right = expr.get('right');
+                if (staticSpec && right.isFunction()) applyQrSpec(right, staticSpec);
+            }
+        }
+
+        if (qrModule.alias) {
+            const aliasDecl = [...topLevelVars.values()].find(p => t.isIdentifier(p.node.id) && t.isIdentifier(p.node.init, { name: currentName }));
+            if (aliasDecl) renameQrBatch(aliasDecl.scope, [[(aliasDecl.node.id as t.Identifier).name, qrModule.alias]]);
+        }
+    }
+
+    const qrErrorCorrectionLevelDecl = [...topLevelVars.values()].find(p => {
+        const init = p.node.init;
+
+        return t.isObjectExpression(init) &&
+            init.properties.length === 4 &&
+            init.properties.every((prop, i) => t.isObjectProperty(prop) && t.isIdentifier(prop.key, { name: 'LMQH'[i] }) && t.isNumericLiteral(prop.value, { value: [1, 0, 3, 2][i] }));
+    });
+
+    if (qrErrorCorrectionLevelDecl) {
+        const { name, modeConstants, maskPatternConstants } = qrConfig.errorCorrectionLevel;
+        const statement = qrErrorCorrectionLevelDecl.parentPath!;
+        const pairs: [string, string][] = [[(qrErrorCorrectionLevelDecl.node.id as t.Identifier).name, name]];
+
+        const collectConstant = (offset: number, expected: number, newName: string) => {
+            const sibling = statement.getSibling((statement.key as number) + offset);
+            if (!sibling.isVariableDeclaration() || sibling.node.declarations.length !== 1) return;
+
+            const [declarator] = sibling.node.declarations;
+            if (t.isIdentifier(declarator.id) && t.isNumericLiteral(declarator.init, { value: expected })) pairs.push([declarator.id.name, newName]);
+        };
+
+        modeConstants.forEach((newName, i) => collectConstant(i - modeConstants.length, 1 << i, newName));
+        maskPatternConstants.forEach((newName, i) => collectConstant(i + 1, i, newName));
+
+        renameQrBatch(qrErrorCorrectionLevelDecl.scope, pairs);
+    } else qrMissing.push(qrConfig.errorCorrectionLevel.name);
+
+    if (qrMatches.length > 0) console.log(`[home.js] qrcode: renamed ${qrRenameCount} identifier(s) across ${qrMatches.length} module(s)`);
+    if (qrMissing.length > 0) console.log(`[home.js] qrcode: no match for ${qrMissing.join(', ')}`);
 
     // pass 8: fold trivial single-use hoisted consts back inline - string arrays with <= 3
     // elements (attribute-name lists like `const H = ["placeholder", "onKeyup"];`) and

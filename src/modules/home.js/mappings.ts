@@ -1,3 +1,18 @@
+export interface QrFunctionSpec {
+    params?: string[];
+    locals?: string[];
+    methods?: Record<string, QrFunctionSpec>;
+    inner?: Record<string, QrFunctionSpec>;
+}
+
+interface QrModule extends QrFunctionSpec {
+    name: string;
+    contains: string[];
+    notContains?: string[];
+    alias?: string;
+    statics?: Record<string, QrFunctionSpec>;
+}
+
 interface Mappings {
     // Vue 2 component options, keyed by their original (kebab-case) component name.
     // *Props are the property names found in that component's `data`/`computed`/`methods`/
@@ -69,6 +84,14 @@ interface Mappings {
     // from the "unmatched mapping" log so it doesn't cry wolf about something that was never
     // going to be found.
     knownAbsent: string[];
+    qrcode: {
+        errorCorrectionLevel: {
+            name: string;
+            modeConstants: string[];
+            maskPatternConstants: string[];
+        };
+        modules: QrModule[];
+    };
 }
 
 const mappings: Mappings = {
@@ -170,9 +193,11 @@ const mappings: Mappings = {
         { name: "SCREENS", regex: /screens: \{\s*type: Object,\s*default: \(\) => ([a-zA-Z0-9$_]{1,2})/ },
 
         { name: "componentChecker", regex: /> ([a-zA-Z0-9$_]{1,2})\.isAvailable\(/, objectParameters: { isAvailable: ["key"] } },
+        { name: "formatProductTitle", regex: /function ([a-zA-Z0-9$_]{1,2})\(([a-zA-Z0-9$_]{1,2}), ([a-zA-Z0-9$_]{1,2})\) \{\s*if \(!\3\) \{\s*return "";\s*\}\s*const [a-zA-Z0-9$_]{1,2} = \2\[\3\.sku \+ "_title"\]/, params: ["loc", "product"] },
         // walks `instance.$parent` up past any BaseTransition/KeepAlive wrapper, stopping at the
         // first "real" component parent - not a vue2 concept (Vue 3-only internal helper, so
         { name: "getRealParent", regex: /function ([a-zA-Z0-9$_]{1,2})\(([a-zA-Z0-9$_]{1,2})\) \{\s*let [a-zA-Z0-9$_]{1,2} = \2 && \2\.\$parent;/, params: ["instance"] },
+        { name: "GIFT_ERRORS", regex: /this.loc\[([a-zA-Z0-9$_]{1,2})\[this/ },
         { name: "isTransitionOrKeepAlive", regex: /function ([a-zA-Z0-9$_]{1,2})\(([a-zA-Z0-9$_]{1,2})\) \{\s*const [a-zA-Z0-9$_]{1,2} = \2\.\$options && \2\.\$options\.name;/, params: ["instance"] },
         { name: "lazyLoadDirective", regex: /.directive\("lazyload", ([a-zA-Z0-9$_]{1,2})\)/, objectParameters: { mounted: ["elem"] } },
         { name: "localStorageUtil", regex: / = ([a-zA-Z0-9$_]{1,2})\.getItem\(/, objectParameters: { getItem: ["name"], setItem: ["name", "value"] } },
@@ -360,7 +385,224 @@ const mappings: Mappings = {
         "title",
         "width"
     ],
-    knownAbsent: ["slider-component"]
+    knownAbsent: ["slider-component"],
+    qrcode: {
+        errorCorrectionLevel: {
+            name: 'QRErrorCorrectionLevel',
+            modeConstants: ['MODE_NUMBER', 'MODE_ALPHA_NUM', 'MODE_8BIT_BYTE', 'MODE_KANJI'],
+            maskPatternConstants: ['PATTERN000', 'PATTERN001', 'PATTERN010', 'PATTERN011', 'PATTERN100', 'PATTERN101', 'PATTERN110', 'PATTERN111']
+        },
+        modules: [
+            {
+                name: 'qrcode',
+                contains: ['createSvgTag', 'renderTo2dContext'],
+                alias: 'createQrCode',
+                params: ['typeNumber', 'errorCorrectionLevel'],
+                locals: ['_typeNumber', '_errorCorrectionLevel', '_modules', '_moduleCount', '_dataCache', '_dataList', '_this', 'makeImpl', 'setupPositionProbePattern', 'setupTimingPattern', 'setupPositionAdjustPattern', 'setupTypeNumber', 'setupTypeInfo', 'mapData', 'createData', 'escapeXml'],
+                inner: {
+                    makeImpl: { params: ['test', 'maskPattern'] },
+                    setupPositionProbePattern: { params: ['row', 'col'] },
+                    setupPositionAdjustPattern: { locals: ['pos'] },
+                    setupTypeNumber: { params: ['test'], locals: ['bits'] },
+                    setupTypeInfo: { params: ['test', 'maskPattern'], locals: ['data', 'bits'] },
+                    mapData: { params: ['data', 'maskPattern'], locals: ['inc', 'row', 'bitIndex', 'byteIndex', 'maskFunc'] },
+                    createData: { params: ['typeNumber', 'errorCorrectionLevel', 'dataList'], locals: ['rsBlocks', 'buffer', 'totalDataCount'] },
+                    escapeXml: { params: ['s'], locals: ['escaped'] }
+                },
+                methods: {
+                    addData: { params: ['data', 'mode'], locals: ['newData'] },
+                    isDark: { params: ['row', 'col'] },
+                    createTableTag: { params: ['cellSize', 'margin'], locals: ['qrHtml'] },
+                    createSvgTag: { params: ['cellSize', 'margin', 'alt', 'title'], locals: ['opts', 'size', 'col', 'colOffset', 'row', 'rowOffset', 'rect', 'qrSvg'] },
+                    createDataURL: { params: ['cellSize', 'margin'], locals: ['size', 'min', 'max'] },
+                    createImgTag: { params: ['cellSize', 'margin', 'alt'], locals: ['size', 'img'] },
+                    createASCII: { params: ['cellSize', 'margin'], locals: ['size', 'min', 'max', 'row', 'col', 'moduleRow', 'cell', 'white', 'black', 'ascii', 'line'] },
+                    renderTo2dContext: { params: ['context', 'cellSize'], locals: ['length'] }
+                },
+                statics: {
+                    stringToBytes: { params: ['s'], locals: ['bytes'] },
+                    createStringToBytes: {
+                        params: ['unicodeData', 'numChars'],
+                        locals: ['unicodeMap', 'unknownChar'],
+                        inner: { unicodeMap: { locals: ['bin', 'read', 'count', 'unicodeMap'] } }
+                    }
+                }
+            },
+            {
+                name: 'QRUtil',
+                contains: ['getBCHTypeInfo', 'getLostPoint'],
+                locals: ['PATTERN_POSITION_TABLE', 'G15', 'G18', '_this', 'getBCHDigit'],
+                inner: { getBCHDigit: { params: ['data'], locals: ['digit'] } },
+                methods: {
+                    getBCHTypeInfo: { params: ['data'], locals: ['remainder'] },
+                    getBCHTypeNumber: { params: ['data'], locals: ['remainder'] },
+                    getPatternPosition: { params: ['typeNumber'] },
+                    getMaskFunction: { params: ['maskPattern'] },
+                    getErrorCorrectPolynomial: { params: ['errorCorrectLength'], locals: ['poly'] },
+                    getLengthInBits: { params: ['mode', 'type'] },
+                    getLostPoint: { params: ['qrcode'], locals: ['moduleCount', 'lostPoint', 'darkCount'] }
+                }
+            },
+            {
+                name: 'QRMath',
+                contains: ['glog', 'gexp'],
+                notContains: ['multiply'],
+                locals: ['EXP_TABLE', 'LOG_TABLE', '_this'],
+                methods: {
+                    glog: { params: ['n'] },
+                    gexp: { params: ['n'] }
+                }
+            },
+            {
+                name: 'qrPolynomial',
+                contains: ['multiply', 'getAt', 'getLength'],
+                params: ['num', 'shift'],
+                locals: ['_num', '_this'],
+                inner: { _num: { locals: ['offset', '_num'] } },
+                methods: {
+                    getAt: { params: ['index'] },
+                    multiply: { locals: ['num'] },
+                    mod: { locals: ['ratio', 'num'] }
+                }
+            },
+            {
+                name: 'QRRSBlock',
+                contains: ['bad rs block @ typeNumber:'],
+                locals: ['RS_BLOCK_TABLE', 'qrRSBlock', '_this'],
+                inner: { qrRSBlock: { params: ['totalCount', 'dataCount'], locals: ['_this'] } },
+                methods: {
+                    getRSBlocks: {
+                        params: ['typeNumber', 'errorCorrectionLevel'],
+                        locals: ['rsBlock', 'length', 'list'],
+                        inner: { rsBlock: { params: ['typeNumber', 'errorCorrectionLevel'] } }
+                    }
+                }
+            },
+            {
+                name: 'qrBitBuffer',
+                contains: ['putBit', 'getBuffer'],
+                locals: ['_buffer', '_length', '_this'],
+                methods: {
+                    getAt: { params: ['index'], locals: ['bufIndex'] },
+                    put: { params: ['num', 'length'] },
+                    putBit: { params: ['bit'], locals: ['bufIndex'] }
+                }
+            },
+            {
+                name: 'createDataURL',
+                contains: ['GIF87a'],
+                params: ['width', 'height', 'getPixel'],
+                locals: ['gif', 'byteOutput', 'base64', 'bytes'],
+                inner: {
+                    gif: {
+                        params: ['width', 'height'],
+                        locals: ['_width', '_height', '_data', '_this', 'getLZWRaster', 'lzwTable'],
+                        methods: {
+                            setPixel: { params: ['x', 'y', 'pixel'] },
+                            write: { params: ['out'], locals: ['raster', 'offset'] }
+                        },
+                        inner: {
+                            getLZWRaster: {
+                                params: ['lzwMinCodeSize'],
+                                locals: ['clearCode', 'endCode', 'bitLength', 'table', 'byteOut', 'bitOut', 'dataIndex', 'prefix'],
+                                inner: {
+                                    bitOut: {
+                                        params: ['out'],
+                                        locals: ['_out', '_bitLength', '_bitBuffer'],
+                                        methods: { write: { params: ['data', 'length'] } }
+                                    }
+                                }
+                            },
+                            lzwTable: {
+                                locals: ['_map', '_size', '_this'],
+                                methods: {
+                                    add: { params: ['key'] },
+                                    indexOf: { params: ['key'] },
+                                    contains: { params: ['key'] }
+                                }
+                            }
+                        }
+                    },
+                    base64: {
+                        locals: ['_buffer', '_buflen', '_length', '_base64', '_this', 'writeEncoded', 'encode'],
+                        inner: {
+                            writeEncoded: { params: ['b'] },
+                            encode: { params: ['n'] }
+                        },
+                        methods: { writeByte: { params: ['n'] } }
+                    }
+                }
+            },
+            {
+                name: 'byteArrayOutputStream',
+                contains: ['writeShort', 'toByteArray'],
+                notContains: ['GIF87a'],
+                locals: ['_bytes', '_this'],
+                methods: {
+                    writeByte: { params: ['b'] },
+                    writeShort: { params: ['i'] },
+                    writeBytes: { params: ['b', 'off', 'len'] },
+                    writeString: { params: ['s'] },
+                    toString: { locals: ['result'] }
+                }
+            },
+            {
+                name: 'base64DecodeInputStream',
+                contains: ['unexpected end of file.'],
+                params: ['str'],
+                locals: ['_str', '_pos', '_buf', '_buflen', '_this', 'decode'],
+                inner: { decode: { params: ['c'] } },
+                methods: { read: { locals: ['byte'] } }
+            },
+            {
+                name: 'qrKanji',
+                contains: ['sjis not supported.'],
+                params: ['data'],
+                locals: ['_mode', 'stringToBytes', '_bytes', '_this'],
+                methods: {
+                    getLength: { params: ['buffer'] },
+                    write: { params: ['buffer'], locals: ['data', 'index'] }
+                }
+            },
+            {
+                name: 'qrAlphaNum',
+                contains: ['"Z"'],
+                params: ['data'],
+                locals: ['_mode', '_data', '_this', 'getCode'],
+                inner: { getCode: { params: ['c'] } },
+                methods: {
+                    getLength: { params: ['buffer'] },
+                    write: { params: ['buffer'], locals: ['data', 'index'] }
+                }
+            },
+            {
+                name: 'qrNumber',
+                contains: ['illegal char :'],
+                notContains: ['"Z"'],
+                params: ['data'],
+                locals: ['_mode', '_data', '_this', 'strToNum', 'charToNum'],
+                inner: {
+                    strToNum: { params: ['s'], locals: ['num'] },
+                    charToNum: { params: ['c'] }
+                },
+                methods: {
+                    getLength: { params: ['buffer'] },
+                    write: { params: ['buffer'], locals: ['data', 'index'] }
+                }
+            },
+            {
+                name: 'qr8BitByte',
+                contains: ['stringToBytes'],
+                notContains: ['sjis not supported.'],
+                params: ['data'],
+                locals: ['_mode', '_bytes', '_this'],
+                methods: {
+                    getLength: { params: ['buffer'] },
+                    write: { params: ['buffer'] }
+                }
+            }
+        ]
+    }
 };
 
 export default mappings;
