@@ -4,7 +4,7 @@ import traverse, { type Binding, type NodePath, type Scope } from '@babel/traver
 import * as t from '@babel/types';
 
 import mappings, { type QrFunctionSpec } from './mappings';
-import { addMapping, type IdentifierMapping } from '../../util/ast';
+import { addMapping, applyBindingRenames, type IdentifierMapping } from '../../util/ast';
 
 // dark-overlay -> DarkOverlay
 const kebabToPascal = (name: string): string => name
@@ -87,36 +87,6 @@ const getComponentKeys = (obj: t.ObjectExpression) => ({
     methodProps: (() => { const o = getSectionObject(obj, 'methods'); return o ? getObjectKeys(o) : []; })(),
     watchProps: (() => { const o = getSectionObject(obj, 'watch'); return o ? getObjectKeys(o) : []; })()
 });
-
-const collectBindingIdentifiers = (binding: Binding): Set<t.Identifier> => {
-    const oldName = binding.identifier.name;
-    const ids = new Set<t.Identifier>([binding.identifier]);
-
-    for (const ref of binding.referencePaths) {
-        if (!t.isIdentifier(ref.node)) continue;
-
-        ids.add(ref.node);
-        if (t.isObjectProperty(ref.parent) && ref.parent.shorthand && ref.parent.value === ref.node) ref.parent.shorthand = false;
-    }
-
-    for (const violation of binding.constantViolations)
-        for (const id of Object.values(t.getBindingIdentifiers(violation.node, false, false, false)).flat())
-            if (id.name === oldName) ids.add(id);
-
-    return ids;
-};
-
-const applyBindingRenames = (items: { binding: Binding; newName: string }[]) => {
-    const prepared = items.map(({ binding, newName }) => ({ binding, newName, oldName: binding.identifier.name, ids: collectBindingIdentifiers(binding) }));
-
-    for (const { binding, oldName } of prepared)
-        if (binding.scope.bindings[oldName] === binding) binding.scope.removeOwnBinding(oldName);
-
-    for (const { binding, newName, ids } of prepared) {
-        for (const id of ids) id.name = newName;
-        binding.scope.bindings[newName] = binding;
-    }
-};
 
 const buildMappedFile = async (inputJS: string): Promise<string> => {
     let lastBench = Date.now();

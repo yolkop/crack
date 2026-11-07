@@ -1,4 +1,4 @@
-import type { NodePath } from '@babel/traverse';
+import traverse, { type Binding, type NodePath, type Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 
 export const sortClassMembers = (classBody: t.ClassBody): void => {
@@ -55,7 +55,70 @@ export const sortClassMembers = (classBody: t.ClassBody): void => {
         : [...orderedAccessors, ...methods];
 };
 
-export const getObjectKeys = (node: t.ObjectExpression): string[] => node.properties
+export const walkAst = (root: t.Node, enter: (node: t.Node, parent: t.Node | null) => void, exit?: (node: t.Node) => void) => {
+    const walk = (node: t.Node, parent: t.Node | null) => {
+        enter(node, parent);
+
+        const keys = t.VISITOR_KEYS[node.type];
+        if (keys) for (const key of keys) {
+            const child = (node as any)[key];
+
+            if (Array.isArray(child)) {
+                for (const item of child) if (item) walk(item, node);
+            } else if (child) walk(child, node);
+        }
+
+        if (exit) exit(node);
+    };
+
+    walk(root, null);
+};
+
+export const visitAst = (root: t.Node, visitors: Record<string, (path: { node: any; parent: any }) => void>) => {
+    const shim = { node: null as any, parent: null as any };
+
+    walkAst(root, (node, parent) => {
+        const visitor = visitors[node.type];
+        if (!visitor) return;
+
+        shim.node = node;
+        shim.parent = parent;
+        visitor(shim);
+    });
+};
+
+export const visitAstScoped = (root: t.Node, visitors: Record<string, (path: { node: any; parent: any; scope: Scope | undefined }) => void>) => {
+    const stack: t.Node[] = [];
+    const scopeCache = (traverse as any).cache.scope as WeakMap<t.Node, Scope>;
+
+    const shim = {
+        node: null as any,
+        parent: null as any,
+        get scope(): Scope | undefined {
+            for (let i = stack.length - 1; i >= 0; i--) {
+                const scope = scopeCache.get(stack[i]);
+                if (scope && scope.block === stack[i]) return scope;
+            }
+
+            return undefined;
+        }
+    };
+
+    walkAst(root, (node, parent) => {
+        stack.push(node);
+
+        const visitor = visitors[node.type];
+        if (!visitor) return;
+
+        shim.node = node;
+        shim.parent = parent;
+        visitor(shim);
+    }, () => {
+        stack.pop();
+    });
+};
+
+export const getObjectKeys =(node: t.ObjectExpression): string[] => node.properties
     .filter(p => t.isObjectProperty(p) && t.isIdentifier(p.key))
     .map(p => (p as t.ObjectProperty).key)
     .filter(k => t.isIdentifier(k))
@@ -108,4 +171,34 @@ export const renameParamsByPosition = (fnPath: NodePath<t.Function>, newNames: s
             console.warn(`failed to rename param ${oldName} -> ${newName}:`, e);
         }
     });
+};
+
+const collectBindingIdentifiers = (binding: Binding): Set<t.Identifier> => {
+    const oldName = binding.identifier.name;
+    const ids = new Set<t.Identifier>([binding.identifier]);
+
+    for (const ref of binding.referencePaths) {
+        if (!t.isIdentifier(ref.node) || ref.node.name !== oldName) continue;
+
+        ids.add(ref.node);
+        if (t.isObjectProperty(ref.parent) && ref.parent.shorthand && ref.parent.value === ref.node) ref.parent.shorthand = false;
+    }
+
+    for (const violation of binding.constantViolations)
+        for (const id of Object.values(t.getBindingIdentifiers(violation.node, false, false, false)).flat())
+            if (id.name === oldName) ids.add(id);
+
+    return ids;
+};
+
+export const applyBindingRenames = (items: { binding: Binding; newName: string }[]) => {
+    const prepared = items.map(({ binding, newName }) => ({ binding, newName, oldName: binding.identifier.name, ids: collectBindingIdentifiers(binding) }));
+
+    for (const { binding, oldName } of prepared)
+        if (binding.scope.bindings[oldName] === binding) binding.scope.removeOwnBinding(oldName);
+
+    for (const { binding, newName, ids } of prepared) {
+        for (const id of ids) id.name = newName;
+        binding.scope.bindings[newName] = binding;
+    }
 };

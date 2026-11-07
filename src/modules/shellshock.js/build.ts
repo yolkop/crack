@@ -5,16 +5,21 @@ import { Worker } from 'node:worker_threads';
 
 import generate from '@babel/generator';
 import * as parser from '@babel/parser';
-import traverse, { type NodePath } from '@babel/traverse';
+import traverse, { type NodePath, type Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 
 import mappings from './mappings';
+
+import { createFirstMatcher } from '../../util/matcher';
 
 import {
     addMapping,
     checkArrayOfObjects,
     getObjectKeys,
     renameParamsByPosition,
+    visitAst,
+    visitAstScoped,
+    walkAst,
     sortClassMembers,
     type IdentifierMapping
 } from '../../util/ast';
@@ -47,6 +52,14 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log('[pre] inputJS size:', inputJS.length);
 
     const numCores = os.cpus().length;
+    const beforeCodeMappings = mappings.functions.filter(m => 'hasCode' in m && m.hasCode && !(m as any).after) as { name: string; hasCode: string }[];
+    const afterCodeMappings = mappings.functions.filter(m => 'hasCode' in m && m.hasCode && (m as any).after) as { name: string; hasCode: string }[];
+    const constructorCodeMappings = mappings.classes.filter(m => 'constructorHasCode' in m) as { name: string; constructorHasCode: string }[];
+
+    const matchBeforeCode = createFirstMatcher(beforeCodeMappings.map(m => m.hasCode));
+    const matchAfterCode = createFirstMatcher(afterCodeMappings.map(m => m.hasCode));
+    const matchConstructorCode = createFirstMatcher(constructorCodeMappings.map(m => m.constructorHasCode));
+
     const ast1Encoded = new TextEncoder().encode(inputJS);
     const ast1Buffer = new SharedArrayBuffer(ast1Encoded.byteLength);
     new Uint8Array(ast1Buffer).set(ast1Encoded);
@@ -125,9 +138,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     if (commCodeVarName) {
         const commCodePropertyMap: { [key: string]: string } = {};
 
-        let i = 0;
-
-        traverse(ast, {
+        visitAst(ast, {
             VariableDeclarator(path) {
                 if (!t.isIdentifier(path.node.id)) return;
                 if (path.node.id.name !== commCodeVarName) return;
@@ -148,7 +159,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                             }
                         }
 
-                        if (!done) prop.key.name = `code${++i}`;
+                        if (!done) prop.key.name = `code${(prop.value as t.NumericLiteral).value}`;
                     }
                 }
             },
@@ -168,7 +179,9 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast1] remapped CommCode in', benchmark());
 
-    traverse(ast, {
+    traverse(ast, { Program(path) { path.stop(); } });
+
+    visitAstScoped(ast, {
         VariableDeclarator(path) {
             if (!t.isIdentifier(path.node.id)) return;
 
@@ -204,14 +217,9 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                     try {
                         let returnedName: string | null = null;
 
-                        traverse(getClassNameMethod, {
-                            ReturnStatement(returnPath) {
-                                if (t.isStringLiteral(returnPath.node.argument)) {
-                                    returnedName = returnPath.node.argument.value;
-                                    returnPath.stop();
-                                }
-                            }
-                        }, path.scope);
+                        walkAst(getClassNameMethod, node => {
+                            if (returnedName === null && t.isReturnStatement(node) && t.isStringLiteral(node.argument)) returnedName = node.argument.value;
+                        });
 
                         if (returnedName) {
                             variableRenames[varName] = `BABYLON_${returnedName}`;
@@ -229,14 +237,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                 if (constructor) {
                     const constructorCode = generate(constructor, { compact: false }).code;
 
-                    for (const mapping of mappings.classes) {
-                        if ('constructorHasCode' in mapping) {
-                            const found = constructorCode.includes(mapping.constructorHasCode);
-                            if (found) {
-                                variableRenames[varName] = mapping.name;
-                                return;
-                            }
-                        }
+                    const matchedIdx = matchConstructorCode(constructorCode);
+                    if (matchedIdx !== -1) {
+                        variableRenames[varName] = constructorCodeMappings[matchedIdx].name;
+                        return;
                     }
 
                     if (constructor.body) {
@@ -250,7 +254,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                                 t.isIdentifier(stmt.expression.right)) {
 
                                 const nameVarName = stmt.expression.right.name;
-                                const binding = path.scope.getBinding(nameVarName);
+                                const binding = path.scope?.getBinding(nameVarName);
 
                                 if (binding && t.isVariableDeclarator(binding.path.node)) {
                                     const init = binding.path.node.init;
@@ -271,14 +275,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             if (t.isFunctionExpression(init) || t.isArrowFunctionExpression(init)) {
                 const funcCode = generate(init, { compact: false }).code;
 
-                for (const mapping of mappings.functions) {
-                    if ('hasCode' in mapping && mapping.hasCode && !mapping.after) {
-                        const found = funcCode.includes(mapping.hasCode);
-                        if (found) {
-                            variableRenames[varName] = mapping.name;
-                            return;
-                        }
-                    }
+                const matchedIdx = matchBeforeCode(funcCode);
+                if (matchedIdx !== -1) {
+                    variableRenames[varName] = beforeCodeMappings[matchedIdx].name;
+                    return;
                 }
             }
         },
@@ -305,14 +305,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             try {
                 const funcCode = generate(path.node, { compact: false }).code;
 
-                for (const mapping of mappings.functions) {
-                    if ('hasCode' in mapping && mapping.hasCode && !mapping.after) {
-                        const found = funcCode.includes(mapping.hasCode);
-                        if (found) {
-                            functionRenames[funcName] = mapping.name;
-                            return;
-                        }
-                    }
+                const matchedIdx = matchBeforeCode(funcCode);
+                if (matchedIdx !== -1) {
+                    functionRenames[funcName] = beforeCodeMappings[matchedIdx].name;
+                    return;
                 }
             } catch (e) {
                 console.warn(`failed to process function ${funcName}:`, e);
@@ -322,8 +318,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast1] crawled auto babylon & hasCodes in', benchmark());
 
-    traverse(ast, {
-        VariableDeclarator(path) {
+    const remapObjectOrArray = (path: NodePath<t.VariableDeclarator>) => {
             if (!t.isIdentifier(path.node.id)) return;
 
             const varName = path.node.id.name;
@@ -393,8 +388,35 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                         variableRenames[varName] = mapping.name;
                 }
             }
+    };
+
+    const collectObjectPaths = (): NodePath<t.VariableDeclarator>[] | null => {
+        const pathCache = (traverse as any).cache.path as WeakMap<t.Node, Map<t.Node, NodePath>>;
+        const found: NodePath<t.VariableDeclarator>[] = [];
+        let complete = true;
+
+        walkAst(ast, (node, parent) => {
+            if (!t.isVariableDeclarator(node) || !t.isIdentifier(node.id) || !node.init) return;
+            if (!t.isObjectExpression(node.init) && !t.isArrayExpression(node.init)) return;
+
+            const cachedPath = parent ? pathCache.get(parent)?.get(node) : undefined;
+            if (cachedPath && cachedPath.node === node) found.push(cachedPath as NodePath<t.VariableDeclarator>);
+            else complete = false;
+        });
+
+        return complete ? found : null;
+    };
+
+    const objectPaths = collectObjectPaths();
+
+    if (objectPaths) {
+        for (const objectPath of objectPaths) {
+            let detached = false;
+            for (let ancestor: NodePath<t.Node> | null = objectPath.parentPath; ancestor; ancestor = ancestor.parentPath)
+                if (ancestor.removed || !ancestor.node) detached = true;
+            if (!detached) remapObjectOrArray(objectPath);
         }
-    });
+    } else traverse(ast, { VariableDeclarator(path) { remapObjectOrArray(path); } });
 
     console.log('[ast1] remapped objects/arrays in', benchmark());
 
@@ -408,7 +430,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast1] got regex results in', benchmark());
 
-    traverse(ast, {
+    visitAst(ast, {
         Identifier(path) {
             const oldName = path.node.name;
             const newName = variableRenames[oldName] || functionRenames[oldName];
@@ -435,6 +457,18 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     const ast2Buffer = new SharedArrayBuffer(ast2Encoded.byteLength);
     new Uint8Array(ast2Buffer).set(ast2Encoded);
 
+    const babylonScanPromise = new Promise<{
+        createShader?: string;
+        ensureShaderStore?: string;
+        shaderAccessor: string[][];
+        shaderFactory: string[][];
+        shaderInclude: string[][];
+        wgslStub: string[][];
+    }>(resolve => {
+        const w = new Worker(path.join(import.meta.dirname, 'babylonWorker.ts'), { workerData: { sab: ast2Buffer } });
+        w.addListener('message', resolve);
+    });
+
     const ast2ChunkSize = Math.ceil(ast2RegexWork.length / numCores);
     const ast2Promise = Promise.all(
         Array.from({ length: numCores }, (_, i) => {
@@ -446,7 +480,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         })
     ) as Promise<{ variableRenames: Record<string, string>, functionRenames: Record<string, string>, propertyRenames: Record<string, string> }[]>;
 
-    const ast2 = parser.parse(inputJS, { sourceType: 'module' });
+    const ast2 = ast;
+    traverse.cache.clear();
+
+    traverse(ast2, { Program(path) { path.stop(); } });
     console.log('[ast2] starting w/ 0 syntax errors');
 
     const babylonMap: IdentifierMapping = {};
@@ -461,11 +498,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     // { name: 'BABYLON_assignToObject', regex: /([A-z0-9$_]+)\([A-z], \{\s*bonesDeclarationWGSL:/ },
 
-    const assignToObjectRegex = /([A-z0-9$_]+)\([A-z0-9$_]+, \{\s*bonesDeclaration(?:WGSL)?:/;
-    const assignToObject = inputJS.match(assignToObjectRegex)?.[1];
-
-    const shaderAccessorRegex = new RegExp(`var ([A-z0-9$_]+) = \\{\\};\\s*${assignToObject}\\(([A-z0-9$_]+), \\{\\s*([A-z0-9$_]+): \\(\\) \\=> ([A-z0-9$_]+)`, 'g');
-    const shaderAccessorMatches = Array.from(inputJS.matchAll(shaderAccessorRegex));
+    const babylonScan = await babylonScanPromise;
+    const shaderAccessorMatches = babylonScan.shaderAccessor;
 
     for (const match of shaderAccessorMatches) {
         if (match[1] && match[2] && match[3] && match[4] && match[1] === match[2]) {
@@ -485,17 +519,14 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
       */
 
     // { name: 'createShader', regex: /([A-z0-9$_]+)\(\{\s*"..\/node_modules\/@babylonjs\/core\/Shaders\/ShadersInclude/ }
-    const createShaderRegex = /([A-z0-9$_]+)\(\{\s*"..\/node_modules\/@babylonjs\/core\/Shaders\/ShadersInclude/;
-    const createShader = inputJS.match(createShaderRegex)?.[1];
+    const createShader = babylonScan.createShader;
     if (!createShader) console.error('failed to find createShader function name');
 
     // { name: 'BABYLON_ensureShaderStore', regex: /postprocess.vertex.js"\(\) \{\s*([A-z0-9$_]+)\(\);/ },
-    const ensureShaderStoreRegex = /postprocess\.vertex\.js"\(\) \{\s*([A-z0-9$_]+)\(\);/;
-    const ensureShaderStore = inputJS.match(ensureShaderStoreRegex)?.[1];
+    const ensureShaderStore = babylonScan.ensureShaderStore;
     if (!ensureShaderStore) console.error('failed to find BABYLON_ensureShaderStore function name');
 
-    const shaderFactoryRegex = new RegExp(`var ([A-z0-9$_]+) = ${createShader}\\(\\{\\s*"[^"]+"\\(\\) \\{\\s*${ensureShaderStore}\\(\\);\\s*(?:[A-z0-9$_]+\\(\\);\\s*)*([A-z0-9$_]+) = "([A-z0-9$_]+)";\\s*([A-z0-9$_]+) = "`, 'g');
-    const shaderFactoryMatches = Array.from(inputJS.matchAll(shaderFactoryRegex));
+    const shaderFactoryMatches = babylonScan.shaderFactory;
 
     for (const match of shaderFactoryMatches) {
         if (match[1] && match[2] && match[3] && match[4]) {
@@ -522,8 +553,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
       BABYLON_ensureShaderStore();
       e.IncludesShadersStoreWGSL.kernelBlurVaryingDeclaration = "
       */
-    const shaderIncludeRegex = new RegExp(`var ([A-z0-9$_]+) = ${createShader}\\(\\{\\s*"[^"]+"\\(\\) \\{\\s*${ensureShaderStore}\\(\\);\\s*(?:(?:[A-z0-9$_]+\\(\\);|"[^"]*";)\\s*)*[A-z0-9$_]+\\.IncludesShadersStore(?:WGSL)?\\.([A-z0-9$_]+) = "`, 'g');
-    const shaderIncludeMatches = Array.from(inputJS.matchAll(shaderIncludeRegex));
+    const shaderIncludeMatches = babylonScan.shaderInclude;
 
     for (const match of shaderIncludeMatches) {
         if (match[1] && match[2]) {
@@ -539,8 +569,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
   });
   */
 
-    const wgslStubRegex = /var ([A-z0-9$_]+) = \{\};\s*var ([A-z0-9$_]+) = [A-z0-9$_]+\(\{\s*"wgsl-stub:[^"]+\/ShadersWGSL\/([^"]+).js"\(\) \{\}\s*\}\);/g;
-    const wgslStubMatches = Array.from(inputJS.matchAll(wgslStubRegex));
+    const wgslStubMatches = babylonScan.wgslStub;
 
     for (const match of wgslStubMatches) {
         if (match[2]) {
@@ -556,25 +585,27 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast2] identified babylon shaders in', benchmark());
 
-    traverse(ast2, {
-        Identifier(path) {
-            const oldName = path.node.name;
-            if (!Object.hasOwn(babylonMap, oldName)) return;
+    let switchForDepth = 0;
 
-            const newName = babylonMap[oldName];
-            if (!newName || typeof newName !== 'string') return console.warn(`skipping invalid mapping for ${oldName}: ${newName}`);
+    walkAst(ast2, (node, parent) => {
+        if (t.isSwitchStatement(node) || t.isForStatement(node)) switchForDepth++;
+        if (!t.isIdentifier(node)) return;
 
-            const parent = path.parent;
+        const oldName = node.name;
+        if (!Object.hasOwn(babylonMap, oldName)) return;
 
-            if (t.isObjectProperty(parent) && parent.key === path.node && !parent.computed) return;
-            if (t.isClassMethod(parent) && parent.key === path.node && !parent.computed) return;
-            if (t.isImportSpecifier(parent) || t.isExportSpecifier(parent)) return;
-            if (t.isObjectMethod(parent) && parent.key === path.node && !parent.computed) return;
-            if ((t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) && parent.property === path.node && !parent.computed) return;
+        const newName = babylonMap[oldName];
+        if (!newName || typeof newName !== 'string') return console.warn(`skipping invalid mapping for ${oldName}: ${newName}`);
 
-            const isInSwitchForClass = !!path.findParent(p => t.isSwitchStatement(p.node) || t.isForStatement(p.node));
-            if (!isInSwitchForClass) path.node.name = newName;
-        }
+        if (t.isObjectProperty(parent) && parent.key === node && !parent.computed) return;
+        if (t.isClassMethod(parent) && parent.key === node && !parent.computed) return;
+        if (t.isImportSpecifier(parent) || t.isExportSpecifier(parent)) return;
+        if (t.isObjectMethod(parent) && parent.key === node && !parent.computed) return;
+        if ((t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) && parent.property === node && !parent.computed) return;
+
+        if (switchForDepth === 0) node.name = newName;
+    }, node => {
+        if (t.isSwitchStatement(node) || t.isForStatement(node)) switchForDepth--;
     });
 
     console.log('[ast2] mapped babylon shaders in', benchmark());
@@ -589,7 +620,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast2] identified variable mappings in', benchmark());
 
-    traverse(ast2, {
+    visitAst(ast2, {
         FunctionDeclaration(path) {
             if (!t.isIdentifier(path.node.id)) return;
 
@@ -598,12 +629,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             try {
                 const funcCode = generate(path.node, { compact: false }).code;
 
-                for (const mapping of mappings.functions) {
-                    if ('hasCode' in mapping && mapping.hasCode && mapping.after) {
-                        const found = funcCode.includes(mapping.hasCode);
-                        if (found) return addMapping(ast2Map, funcName, mapping.name);
-                    }
-                }
+                const matchedIdx = matchAfterCode(funcCode);
+                if (matchedIdx !== -1) return addMapping(ast2Map, funcName, afterCodeMappings[matchedIdx].name);
             } catch (e) {
                 console.warn(`Failed to process function ${funcName}:`, e);
             }
@@ -612,7 +639,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast2] identified function mappings (pass 2) in', benchmark());
 
-    traverse(ast2, {
+    visitAst(ast2, {
         Identifier(path) {
             const oldName = path.node.name;
             if (!Object.hasOwn(ast2Map, oldName)) return;
@@ -739,7 +766,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         if (accurateName && constName !== accurateName) parameterRenames[constName] = accurateName;
     });
 
-    traverse(ast2, {
+    visitAst(ast2, {
         ClassDeclaration(path) {
             for (const item of path.node.body.body) {
                 if (t.isClassMethod(item) && t.isIdentifier(item.key)) {
@@ -781,7 +808,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             }
         },
         VariableDeclarator(path) {
-            const isForLoopVar = path.parentPath.isForStatement() || path.parentPath.isForInStatement() || path.parentPath.isForOfStatement();
+            const isForLoopVar = t.isForStatement(path.parent) || t.isForInStatement(path.parent) || t.isForOfStatement(path.parent);
 
             if (isForLoopVar && t.isIdentifier(path.node.id)) {
                 const oldName = path.node.id.name;
@@ -891,53 +918,55 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         regex: new RegExp(m.regex!, 'g')
     }));
 
-    traverse(ast3, {
-        SwitchStatement(path) {
-            const forLoopParent = path.findParent(p => t.isForStatement(p.node));
-            if (forLoopParent) {
-                const forLoopEvaluator = forLoopParent.get('test');
-                const string = forLoopEvaluator.toString();
-                if (string.includes('isMoreDataAvailable')) {
-                    const fullForLoopCode = forLoopParent.toString();
+    const forStack: t.ForStatement[] = [];
 
-                    const switchRenames: IdentifierMapping = {};
+    walkAst(ast3, node => {
+        if (t.isForStatement(node)) forStack.push(node);
+        if (!t.isSwitchStatement(node)) return;
 
-                    for (const { name, regex } of switchRegexes) {
-                        regex.lastIndex = 0;
+        const forLoopParent = forStack[forStack.length - 1];
+        if (!forLoopParent || !forLoopParent.test) return;
 
-                        const match = regex.exec(fullForLoopCode);
-                        if (match && match[1]) {
-                            switchRenames[match[1]] = name;
-                            // console.log(`CommSwitch mapping: ${match[1]} -> ${name}`);
-                        }
-                    }
+        const string = generate(forLoopParent.test).code;
+        if (!string.includes('isMoreDataAvailable')) return;
 
-                    traverse(path.node, {
-                        Identifier(path) {
-                            const oldName = path.node.name;
-                            const newName = switchRenames[oldName];
-                            if (!newName) return;
+        const fullForLoopCode = generate(forLoopParent).code;
 
-                            const parent = path.parent;
+        const switchRenames: IdentifierMapping = {};
 
-                            // skip object direct prop keys
-                            if (t.isObjectProperty(parent) && parent.key === path.node && !parent.computed) return;
-                            // skip class method names
-                            if (t.isClassMethod(parent) && parent.key === path.node && !parent.computed) return;
-                            // skip import/export (shouldn't be in shell but anyway) 
-                            if (t.isImportSpecifier(parent) || t.isExportSpecifier(parent)) return;
-                            // skip object method names
-                            if (t.isObjectMethod(parent) && parent.key === path.node && !parent.computed) return;
-                            // skip non-computed member expression properties
-                            if ((t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) && parent.property === path.node && !parent.computed) return;
+        for (const { name, regex } of switchRegexes) {
+            regex.lastIndex = 0;
 
-                            path.node.name = newName;
-                            // console.log(`remapped CommSwitch identifier: ${oldName} -> ${newName}`);
-                        }
-                    }, path.scope);
-                }
+            const match = regex.exec(fullForLoopCode);
+            if (match && match[1]) {
+                switchRenames[match[1]] = name;
+                // console.log(`CommSwitch mapping: ${match[1]} -> ${name}`);
             }
         }
+
+        walkAst(node, (identifier, parent) => {
+            if (!t.isIdentifier(identifier)) return;
+
+            const oldName = identifier.name;
+            const newName = switchRenames[oldName];
+            if (!newName) return;
+
+            // skip object direct prop keys
+            if (t.isObjectProperty(parent) && parent.key === identifier && !parent.computed) return;
+            // skip class method names
+            if (t.isClassMethod(parent) && parent.key === identifier && !parent.computed) return;
+            // skip import/export (shouldn't be in shell but anyway)
+            if (t.isImportSpecifier(parent) || t.isExportSpecifier(parent)) return;
+            // skip object method names
+            if (t.isObjectMethod(parent) && parent.key === identifier && !parent.computed) return;
+            // skip non-computed member expression properties
+            if ((t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) && parent.property === identifier && !parent.computed) return;
+
+            identifier.name = newName;
+            // console.log(`remapped CommSwitch identifier: ${oldName} -> ${newName}`);
+        });
+    }, node => {
+        if (t.isForStatement(node)) forStack.pop();
     });
 
     console.log('[ast3] processed comm switch mappings in', benchmark());
@@ -948,7 +977,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast3] identified property renames in', benchmark());
 
-    traverse(ast3, {
+    visitAst(ast3, {
         ClassDeclaration(path) {
             for (const item of path.node.body.body) {
                 if (t.isClassMethod(item) && t.isIdentifier(item.key)) {
@@ -1270,9 +1299,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
     console.log('[ast3] performed general cleanups in', benchmark());
 
-    traverse(ast3, {
-        BinaryExpression: {
-            exit(path) {
+    const foldBinary = (path: NodePath<t.BinaryExpression>) => {
                 const { node } = path;
 
                 if (node.operator === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
@@ -1313,17 +1340,39 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
                 if (typeof result === 'number') path.replaceWith(t.numericLiteral(result));
                 else if (typeof result === 'boolean') path.replaceWith(t.booleanLiteral(result));
-            }
-        }
-    });
+    };
+
+    const collectBinaryPaths = (): NodePath<t.BinaryExpression>[] | null => {
+        const pathCache = (traverse as any).cache.path as WeakMap<t.Node, Map<t.Node, NodePath>>;
+        const found: NodePath<t.BinaryExpression>[] = [];
+        const parents: (t.Node | null)[] = [];
+        let complete = true;
+
+        walkAst(ast3, (node, parent) => {
+            parents.push(parent);
+        }, node => {
+            const parent = parents.pop() ?? null;
+            if (!t.isBinaryExpression(node)) return;
+
+            const cachedPath = parent ? pathCache.get(parent)?.get(node) : undefined;
+            if (cachedPath && cachedPath.node === node) found.push(cachedPath as NodePath<t.BinaryExpression>);
+            else complete = false;
+        });
+
+        return complete ? found : null;
+    };
+
+    const binaryPaths = collectBinaryPaths();
+
+    if (binaryPaths) for (const binaryPath of binaryPaths) foldBinary(binaryPath);
+    else traverse(ast3, { BinaryExpression: { exit(path) { foldBinary(path); } } });
 
     console.log('[ast3] folded binary expressions in', benchmark());
 
-    traverse(ast3, {
-        Scope(path) {
+    const inlineScopeConstants = (scope: Scope) => {
             const toInline = new Map<string, t.Expression>();
 
-            for (const [name, binding] of Object.entries(path.scope.bindings)) {
+            for (const [name, binding] of Object.entries(scope.bindings)) {
                 if (!binding.constant) continue;
                 const decl = binding.path.node;
                 if (!t.isVariableDeclarator(decl) || !decl.init) continue;
@@ -1374,7 +1423,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             }
 
             for (const [name, value] of toInline) {
-                const binding = path.scope.bindings[name];
+                const binding = scope.bindings[name];
                 for (const ref of binding.referencePaths) {
                     if (ref === binding.path.get('id')) continue;
 
@@ -1388,8 +1437,28 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
                 }
                 binding.path.remove();
             }
-        }
-    });
+    };
+
+    const collectScopes = (): Scope[] | null => {
+        const scopeCache = (traverse as any).cache.scope as WeakMap<t.Node, Scope>;
+        const scopes: Scope[] = [];
+        let complete = true;
+
+        walkAst(ast3, (node, parent) => {
+            if (!t.isScopable(node)) return;
+
+            const scope = scopeCache.get(node);
+            if (scope && scope.block === node) scopes.push(scope);
+            else if (!(t.isBlockStatement(node) && (t.isFunction(parent) || t.isCatchClause(parent)))) complete = false;
+        });
+
+        return complete ? scopes : null;
+    };
+
+    const inlineScopes = collectScopes();
+
+    if (inlineScopes) for (const scope of inlineScopes) inlineScopeConstants(scope);
+    else traverse(ast3, { Scope(path) { inlineScopeConstants(path.scope); } });
 
     console.log('[ast3] inlined constants in', benchmark());
 
@@ -1469,7 +1538,91 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             pushDecomp(name, `[function] ${name}(${describeParams(fnPath.node.params)}): not mapped`);
     };
 
-    traverse(ast3, {
+    const applyParamNamesFast = (): boolean => {
+        const ops: { fn: t.Function; owner: string; label: string; names: string[] | undefined }[] = [];
+
+        const collectClass = (classNode: t.ClassExpression | t.ClassDeclaration, className: string) => {
+            if (!knownClassNames.has(className)) return;
+
+            const constructor = classNode.body.body.find(item => t.isClassMethod(item) && item.kind === 'constructor');
+            if (constructor) ops.push({ fn: constructor as t.ClassMethod, owner: className, label: `[class] ${className}.constructor`, names: classParamsByName[className] });
+
+            const methodParams = classMethodParamsByName[className];
+
+            for (const item of classNode.body.body) {
+                if (!t.isClassMethod(item) || item.kind === 'constructor' || item.kind === 'get') continue;
+                if (item.computed || !t.isIdentifier(item.key)) continue;
+                if (item.params.length === 0) continue;
+
+                ops.push({ fn: item, owner: className, label: `[class] ${className}.${item.key.name}`, names: methodParams?.[item.key.name] });
+            }
+        };
+
+        const collectFunction = (fn: t.Function, name: string) => {
+            if (!knownFunctionNames.has(name)) return;
+            ops.push({ fn, owner: name, label: `[function] ${name}`, names: functionParamsByName[name] });
+        };
+
+        walkAst(ast3, node => {
+            if (t.isClassDeclaration(node)) {
+                if (t.isIdentifier(node.id)) collectClass(node, node.id.name);
+            } else if (t.isVariableDeclarator(node)) {
+                if (!t.isIdentifier(node.id) || !node.init) return;
+
+                if (t.isClassExpression(node.init)) collectClass(node.init, node.id.name);
+                else if (t.isFunctionExpression(node.init) || t.isArrowFunctionExpression(node.init)) collectFunction(node.init, node.id.name);
+            } else if (t.isAssignmentExpression(node)) {
+                const { left, right } = node;
+                if (!t.isFunctionExpression(right)) return;
+                if (!t.isMemberExpression(left) || left.computed || !t.isIdentifier(left.property)) return;
+
+                const objExpr = left.object;
+                if (!t.isMemberExpression(objExpr) || objExpr.computed) return;
+                if (!t.isIdentifier(objExpr.property, { name: 'prototype' })) return;
+                if (!t.isIdentifier(objExpr.object)) return;
+
+                const ownerName = objExpr.object.name;
+                if (!knownFunctionNames.has(ownerName)) return;
+
+                ops.push({ fn: right, owner: ownerName, label: `[function] ${ownerName}.${left.property.name}`, names: functionMethodParamsByName[ownerName]?.[left.property.name] });
+            } else if (t.isFunctionDeclaration(node)) {
+                if (t.isIdentifier(node.id)) collectFunction(node, node.id.name);
+            }
+        });
+
+        const scopeCache = (traverse as any).cache.scope as WeakMap<t.Node, Scope>;
+        const scopes = new Map<t.Function, Scope>();
+
+        for (const op of ops) {
+            if (!op.names) continue;
+
+            const scope = scopeCache.get(op.fn);
+            if (!scope || scope.block !== op.fn) return false;
+            scopes.set(op.fn, scope);
+        }
+
+        for (const { fn, owner, label, names } of ops) {
+            if (names) {
+                fn.params.forEach((param, i) => {
+                    const newName = names[i];
+                    if (!newName || !t.isIdentifier(param)) return;
+
+                    const oldName = param.name;
+                    if (oldName === newName) return;
+
+                    try {
+                        scopes.get(fn)!.rename(oldName, newName);
+                    } catch (e) {
+                        console.warn(`failed to rename param ${oldName} -> ${newName}:`, e);
+                    }
+                });
+            } else if (fn.params.length > 0) pushDecomp(owner, `${label}(${describeParams(fn.params)}): not mapped`);
+        }
+
+        return true;
+    };
+
+    if (!applyParamNamesFast()) traverse(ast3, {
         ClassDeclaration(path) {
             if (t.isIdentifier(path.node.id)) applyConstructorParams(path, path.node.id.name);
         },
@@ -1528,6 +1681,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log(`[ast3] wrote ${decompReport.length} unmapped entries to`, decompReportPath);
 
     const finalCode = generate(ast3, { retainLines: false, compact: false }).code;
+    console.log('[ast3] generated final code in', benchmark());
 
     console.log('AST finished in', (((Date.now() - start) / 1000).toFixed(3) + 's'));
 

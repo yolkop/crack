@@ -1,5 +1,7 @@
 import { workerData, parentPort } from 'worker_threads';
 
+import { execFirst } from '../../util/fastRegex';
+
 const { sab, chunk } = workerData as {
     sab: SharedArrayBuffer;
     chunk: Array<{
@@ -26,9 +28,7 @@ const results: {
 for (const pattern of chunk) {
     if (!pattern.regex) continue;
 
-    const regex = new RegExp(pattern.regex, 'g');
-    regex.lastIndex = 0;
-    const match = regex.exec(src);
+    const match = execFirst(src, pattern.regex);
     if (!match?.[1]) continue;
 
     const captured = match[1];
