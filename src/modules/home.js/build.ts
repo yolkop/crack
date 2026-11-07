@@ -88,8 +88,46 @@ const getComponentKeys = (obj: t.ObjectExpression) => ({
     watchProps: (() => { const o = getSectionObject(obj, 'watch'); return o ? getObjectKeys(o) : []; })()
 });
 
+const collectBindingIdentifiers = (binding: Binding): Set<t.Identifier> => {
+    const oldName = binding.identifier.name;
+    const ids = new Set<t.Identifier>([binding.identifier]);
+
+    for (const ref of binding.referencePaths) {
+        if (!t.isIdentifier(ref.node)) continue;
+
+        ids.add(ref.node);
+        if (t.isObjectProperty(ref.parent) && ref.parent.shorthand && ref.parent.value === ref.node) ref.parent.shorthand = false;
+    }
+
+    for (const violation of binding.constantViolations)
+        for (const id of Object.values(t.getBindingIdentifiers(violation.node, false, false, false)).flat())
+            if (id.name === oldName) ids.add(id);
+
+    return ids;
+};
+
+const applyBindingRenames = (items: { binding: Binding; newName: string }[]) => {
+    const prepared = items.map(({ binding, newName }) => ({ binding, newName, oldName: binding.identifier.name, ids: collectBindingIdentifiers(binding) }));
+
+    for (const { binding, oldName } of prepared)
+        if (binding.scope.bindings[oldName] === binding) binding.scope.removeOwnBinding(oldName);
+
+    for (const { binding, newName, ids } of prepared) {
+        for (const id of ids) id.name = newName;
+        binding.scope.bindings[newName] = binding;
+    }
+};
+
 const buildMappedFile = async (inputJS: string): Promise<string> => {
+    let lastBench = Date.now();
+    const benchmark = (label: string) => {
+        const now = Date.now();
+        console.log(`${label}: ${((now - lastBench) / 1000).toFixed(3)}s`);
+        lastBench = now;
+    };
+
     const ast = parser.parse(inputJS, { sourceType: 'module' });
+    benchmark('parse');
 
     // the whole file is normally wrapped in a single IIFE: `(() => { ...everything... })();`
     // find that wrapper (if any) so we only look at genuine top-level `var`s below, and don't
@@ -147,6 +185,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             topLevelFunctions.set(path.node.id.name, path);
         }
     });
+
+    benchmark('top-level scan');
 
     const variableRenames: IdentifierMapping = {};
 
@@ -209,14 +249,14 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         const capturedName = match?.[1];
 
         if (!capturedName) {
-            console.log(`[home.js] variableRemap '${remap.name}' did not match anything`);
+            console.log(`variableRemap '${remap.name}' did not match anything`);
             continue;
         }
 
         if (Object.hasOwn(variableRenames, capturedName)) continue; // already claimed by something else
 
         if (!topLevelVars.has(capturedName) && !topLevelFunctions.has(capturedName)) {
-            console.log(`[home.js] variableRemap '${remap.name}' matched '${capturedName}', but that's not a top-level var/function - skipped`);
+            console.log(`variableRemap '${remap.name}' matched '${capturedName}', but that's not a top-level var/function - skipped`);
             continue;
         }
 
@@ -229,7 +269,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         if (remap.objectParameters) {
             const init = topLevelVars.get(capturedName)?.node.init;
             if (init && t.isObjectExpression(init)) sectionParamsByObjectNode.set(init, remap.objectParameters);
-            else console.log(`[home.js] variableRemap '${remap.name}' has objectParameters but '${capturedName}' isn't an object literal - skipped`);
+            else console.log(`variableRemap '${remap.name}' has objectParameters but '${capturedName}' isn't an object literal - skipped`);
         }
 
         // this remap also carries known names for the pointed-at function's OWN leading params -
@@ -238,9 +278,11 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         if (remap.params) {
             const fnPath = getTopLevelFunctionPath(capturedName);
             if (fnPath) renameLeadingParams(fnPath, remap.params);
-            else console.log(`[home.js] variableRemap '${remap.name}' has params but '${capturedName}' isn't a function - skipped`);
+            else console.log(`variableRemap '${remap.name}' has params but '${capturedName}' isn't a function - skipped`);
         }
     }
+
+    benchmark('pass 0');
 
     // pass 1: find registry objects that map component names straight to their variable,
     // e.g. `var Ee = { "dark-overlay": e, "light-overlay": t, ... };` - these are unambiguous.
@@ -274,9 +316,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             componentRegistryIdx++;
             const registryNewName = `componentRegistry${componentRegistryIdx}`;
             addMapping(variableRenames, registryVarName, registryNewName);
-            console.log(`[home.js] resolved ${matched} component(s) via registry var '${registryVarName}' -> renamed to '${registryNewName}'`);
         }
     }
+
+    benchmark('pass 1');
 
     // pass 2: `window.readableName = obfuscatedVar;` assignments (usually near the end of the
     // file) directly name several top-level helper objects, e.g.
@@ -305,7 +348,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    console.log(`[home.js] mapped ${Object.keys(variableRenames).length} component variable(s) after window.* pass`);
+    benchmark('pass 2');
+    console.log(`mapped ${Object.keys(variableRenames).length} component variable(s) after window.* pass`);
 
     // pass 3: for every remaining top-level object that looks like a component (has a `render`
     // key, or any data/computed/methods/watch), match its keys against the vue2 mappings to
@@ -363,10 +407,12 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     };
 
     matchRemainingComponents(2);
-    console.log(`[home.js] mapped ${Object.keys(variableRenames).length} component variable(s) after strict key match`);
+    console.log(`mapped ${Object.keys(variableRenames).length} component variable(s) after strict key match`);
 
+    benchmark('pass 3 strict');
     const lenientMatched = matchRemainingComponents(1);
-    console.log(`[home.js] lenient key match caught ${lenientMatched} more component variable(s)`);
+    benchmark('pass 3 lenient');
+    console.log(`lenient key match caught ${lenientMatched} more component variable(s)`);
 
     // pass 3d: manual fallback for components too generic to key-match at all (few/no
     // distinctive data/computed/methods/watch names) - if a literal substring from
@@ -394,13 +440,13 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
 
             addMapping(variableRenames, varName, newName);
             manualMatched++;
-            console.log(`[home.js] manually matched '${varName}' -> '${manual.name}' via renderContains`);
             break;
         }
     }
 
-    console.log(`[home.js] manual renderContains match caught ${manualMatched} more component variable(s)`);
-    console.log(`[home.js] mapped ${Object.keys(variableRenames).length} component variable(s)`);
+    benchmark('pass 3d');
+    console.log(`manual renderContains match caught ${manualMatched} more component variable(s)`);
+    console.log(`mapped ${Object.keys(variableRenames).length} component variable(s)`);
 
     // log anything from mappings.ts that never ended up matching any variable, by any pass -
     // useful for spotting vue2 components that got renamed/removed/merged since the mapping
@@ -412,9 +458,9 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     );
 
     if (unmatchedMappings.length > 0) {
-        console.log(`[home.js] ${unmatchedMappings.length} mapping(s) unmatched: ${unmatchedMappings.map(m => m.name).join(', ')}`);
+        console.log(`${unmatchedMappings.length} mapping(s) unmatched: ${unmatchedMappings.map(m => m.name).join(', ')}`);
     } else {
-        console.log('[home.js] every mapping matched a variable');
+        console.log('every mapping matched a variable');
     }
 
     // pass 3c: component-factory helpers - `var Ke = e => ({ render: e, props: [...], ... });`
@@ -520,14 +566,23 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         renderCoreOldNames.add(coreOldName);
     }
 
+    benchmark('pass 3c');
+
     // scope-aware rename: only touches references bound to this specific top-level declaration,
     // leaving same-named locals/params deep inside unrelated render functions untouched.
+    const topLevelRenames: { binding: Binding; newName: string }[] = [];
+
     for (const [oldName, newName] of Object.entries(variableRenames)) {
         const declPath = topLevelVars.get(oldName) ?? topLevelFunctions.get(oldName);
         if (!declPath) continue;
 
-        declPath.scope.rename(oldName, newName);
+        const binding = declPath.scope.getBinding(oldName);
+        if (binding) topLevelRenames.push({ binding, newName });
     }
+
+    applyBindingRenames(topLevelRenames);
+
+    benchmark('top-level renames');
 
     // pass 4: unalias `const { propName: alias } = SomeObject;`-style destructures. Property
     // names are never minified (only the local alias is), e.g. `const { vShow: e } = Vue;` ->
@@ -555,6 +610,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             }
         }
     });
+
+    benchmark('pass 4');
 
     // pass 5: `const c = resolveComponent("social-promo");` -> name the local var after what
     // it actually resolves to, e.g. `SocialPromoComponent` (and `resolveDirective("lazyload")`
@@ -588,6 +645,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             path.scope.rename(oldName, newName);
         }
     });
+
+    benchmark('pass 5');
 
     // pass 6: for every component var we successfully named, also recover its `computed`
     // getters'/`methods`'/`watch`ers' parameter names from vue2 wherever the arity matches
@@ -698,6 +757,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         });
     }
 
+    benchmark('pass 6/6b/6c collect');
+
     const applyParamRename = (fnPath: NodePath<t.Function>, key: string | null, paramsMap: Record<string, string[]>) => {
         if (!key) return;
 
@@ -783,6 +844,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             }
         });
     }
+
+    benchmark('pass 6 apply');
 
     // pass 7: the compiled Vue 3 render function - `render: function () { ...consts...; return
     // function (a, b) { ... }; }()`, or occasionally just `render(a, b) {...}` with no wrapper -
@@ -883,6 +946,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         if (fnPath) renameLeadingParams(fnPath, renderParamNames);
     }
 
+    benchmark('pass 7');
+
     // pass 7b: `renderList(source, (t, i) => {...})` - Vue's v-for helper (destructured off the
     // Vue global by pass 4, so its own name is never minified). The callback is always
     // positional: iterating an array/set/string/number gives `(item, idx)`; iterating a plain
@@ -906,7 +971,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         }
     });
 
-    let qrTempIdx = 0;
+    benchmark('pass 7b');
+
     let qrRenameCount = 0;
 
     const getBindingUsages = (binding: Binding): NodePath[] => [...binding.referencePaths, ...binding.constantViolations];
@@ -947,16 +1013,8 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             });
         }
 
-        const temps = candidates.map(candidate => {
-            const temp = `__qr${qrTempIdx++}`;
-            scope.rename(candidate.binding.identifier.name, temp);
-            return temp;
-        });
-
-        candidates.forEach((candidate, i) => {
-            scope.rename(temps[i], candidate.newName);
-            qrRenameCount++;
-        });
+        applyBindingRenames(candidates);
+        qrRenameCount += candidates.length;
     };
 
     const unwrapQrFunction = (path: NodePath<t.Node | null | undefined> | undefined): NodePath<t.Function> | null => {
@@ -1038,7 +1096,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             for (const [name, methodSpec] of Object.entries(spec.methods)) {
                 const member = members.get(name);
                 if (member) applyQrSpec(member, methodSpec);
-                else console.log(`[home.js] qrcode method '${name}' was not found`);
+                else console.log(`qrcode method '${name}' was not found`);
             }
         }
 
@@ -1047,7 +1105,7 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
             const innerFn = unwrapQrFunction(declarator?.get('init'));
 
             if (innerFn) applyQrSpec(innerFn, innerSpec);
-            else console.log(`[home.js] qrcode inner function '${name}' was not found`);
+            else console.log(`qrcode inner function '${name}' was not found`);
         }
     };
 
@@ -1135,8 +1193,10 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         renameQrBatch(qrErrorCorrectionLevelDecl.scope, pairs);
     } else qrMissing.push(qrConfig.errorCorrectionLevel.name);
 
-    if (qrMatches.length > 0) console.log(`[home.js] qrcode: renamed ${qrRenameCount} identifier(s) across ${qrMatches.length} module(s)`);
-    if (qrMissing.length > 0) console.log(`[home.js] qrcode: no match for ${qrMissing.join(', ')}`);
+    if (qrMatches.length > 0) console.log(`qrcode: renamed ${qrRenameCount} identifier(s) across ${qrMatches.length} module(s)`);
+    if (qrMissing.length > 0) console.log(`qrcode: no match for ${qrMissing.join(', ')}`);
+
+    benchmark('qrcode');
 
     // pass 8: fold trivial single-use hoisted consts back inline - string arrays with <= 3
     // elements (attribute-name lists like `const H = ["placeholder", "onKeyup"];`) and
@@ -1187,7 +1247,12 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
         else declPath.remove();
     }
 
-    return generate(ast, { retainLines: false, compact: false }).code;
+    benchmark('pass 8');
+
+    const output = generate(ast, { retainLines: false, compact: false }).code;
+    benchmark('generate');
+
+    return output;
 }
 
 export default buildMappedFile;
