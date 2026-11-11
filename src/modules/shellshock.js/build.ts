@@ -319,75 +319,75 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log('[ast1] crawled auto babylon & hasCodes in', benchmark());
 
     const remapObjectOrArray = (path: NodePath<t.VariableDeclarator>) => {
-            if (!t.isIdentifier(path.node.id)) return;
+        if (!t.isIdentifier(path.node.id)) return;
 
-            const varName = path.node.id.name;
-            const init = path.node.init;
+        const varName = path.node.id.name;
+        const init = path.node.init;
 
-            if (!init) return;
+        if (!init) return;
 
-            if (t.isObjectExpression(init)) {
-                const keys = getObjectKeys(init);
+        if (t.isObjectExpression(init)) {
+            const keys = getObjectKeys(init);
 
-                for (const mapping of mappings.objects) {
-                    if (mapping.hasKeys && mapping.hasKeys.every(key => keys.includes(key))) {
-                        if (mapping.keyCount && keys.length !== mapping.keyCount) continue;
+            for (const mapping of mappings.objects) {
+                if (mapping.hasKeys && mapping.hasKeys.every(key => keys.includes(key))) {
+                    if (mapping.keyCount && keys.length !== mapping.keyCount) continue;
 
-                        variableRenames[varName] = mapping.name;
+                    variableRenames[varName] = mapping.name;
 
-                        if (mapping.inline) {
-                            const inlineMap: Record<string, t.StringLiteral | t.NumericLiteral> = {};
+                    if (mapping.inline) {
+                        const inlineMap: Record<string, t.StringLiteral | t.NumericLiteral> = {};
 
-                            for (const prop of init.properties) {
-                                if (
-                                    t.isObjectProperty(prop) &&
-                                    t.isIdentifier(prop.key) &&
-                                    !prop.computed &&
-                                    (t.isStringLiteral(prop.value) || t.isNumericLiteral(prop.value))
-                                ) {
-                                    inlineMap[prop.key.name] = prop.value;
+                        for (const prop of init.properties) {
+                            if (
+                                t.isObjectProperty(prop) &&
+                                t.isIdentifier(prop.key) &&
+                                !prop.computed &&
+                                (t.isStringLiteral(prop.value) || t.isNumericLiteral(prop.value))
+                            ) {
+                                inlineMap[prop.key.name] = prop.value;
+                            }
+                        }
+
+                        const binding = path.scope.getBinding(varName);
+                        if (binding) {
+                            let replacedCount = 0;
+
+                            for (const ref of binding.referencePaths) {
+                                const refParent = ref.parentPath;
+                                if (!refParent) continue;
+
+                                if (refParent.isMemberExpression({ object: ref.node }) && !refParent.node.computed && t.isIdentifier(refParent.node.property)) {
+                                    const key = refParent.node.property.name;
+                                    if (key in inlineMap) {
+                                        refParent.replaceWith(t.cloneNode(inlineMap[key]));
+                                        replacedCount++;
+                                    }
+                                } else if (refParent.isMemberExpression({ object: ref.node }) && refParent.node.computed && t.isStringLiteral(refParent.node.property)) {
+                                    const key = refParent.node.property.value;
+                                    if (key in inlineMap) {
+                                        refParent.replaceWith(t.cloneNode(inlineMap[key]));
+                                        replacedCount++;
+                                    }
                                 }
                             }
 
-                            const binding = path.scope.getBinding(varName);
-                            if (binding) {
-                                let replacedCount = 0;
-
-                                for (const ref of binding.referencePaths) {
-                                    const refParent = ref.parentPath;
-                                    if (!refParent) continue;
-
-                                    if (refParent.isMemberExpression({ object: ref.node }) && !refParent.node.computed && t.isIdentifier(refParent.node.property)) {
-                                        const key = refParent.node.property.name;
-                                        if (key in inlineMap) {
-                                            refParent.replaceWith(t.cloneNode(inlineMap[key]));
-                                            replacedCount++;
-                                        }
-                                    } else if (refParent.isMemberExpression({ object: ref.node }) && refParent.node.computed && t.isStringLiteral(refParent.node.property)) {
-                                        const key = refParent.node.property.value;
-                                        if (key in inlineMap) {
-                                            refParent.replaceWith(t.cloneNode(inlineMap[key]));
-                                            replacedCount++;
-                                        }
-                                    }
-                                }
-
-                                if (replacedCount === binding.referencePaths.length) {
-                                    delete variableRenames[varName];
-                                    path.remove();
-                                }
+                            if (replacedCount === binding.referencePaths.length) {
+                                delete variableRenames[varName];
+                                path.remove();
                             }
                         }
                     }
                 }
             }
+        }
 
-            if (t.isArrayExpression(init)) {
-                for (const mapping of mappings.constants) {
-                    if (mapping.objectHasProps && checkArrayOfObjects(init, mapping.objectHasProps))
-                        variableRenames[varName] = mapping.name;
-                }
+        if (t.isArrayExpression(init)) {
+            for (const mapping of mappings.constants) {
+                if (mapping.objectHasProps && checkArrayOfObjects(init, mapping.objectHasProps))
+                    variableRenames[varName] = mapping.name;
             }
+        }
     };
 
     const collectObjectPaths = (): NodePath<t.VariableDeclarator>[] | null => {
@@ -1300,46 +1300,46 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log('[ast3] performed general cleanups in', benchmark());
 
     const foldBinary = (path: NodePath<t.BinaryExpression>) => {
-                const { node } = path;
+        const { node } = path;
 
-                if (node.operator === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
-                    path.replaceWith(node.left);
-                    return;
-                }
+        if (node.operator === '|' && t.isNumericLiteral(node.right) && node.right.value === 0) {
+            path.replaceWith(node.left);
+            return;
+        }
 
-                const getNum = (n: t.Expression): number | null => {
-                    if (t.isNumericLiteral(n)) return n.value;
-                    if (t.isUnaryExpression(n) && n.operator === '-' && t.isNumericLiteral(n.argument)) return -n.argument.value;
-                    return null;
-                };
+        const getNum = (n: t.Expression): number | null => {
+            if (t.isNumericLiteral(n)) return n.value;
+            if (t.isUnaryExpression(n) && n.operator === '-' && t.isNumericLiteral(n.argument)) return -n.argument.value;
+            return null;
+        };
 
-                if (node.left.type === 'PrivateName') return;
+        if (node.left.type === 'PrivateName') return;
 
-                const left = getNum(node.left);
-                const right = getNum(node.right);
-                if (left === null || right === null) return;
+        const left = getNum(node.left);
+        const right = getNum(node.right);
+        if (left === null || right === null) return;
 
-                let result: number | boolean | null = null;
-                switch (node.operator) {
-                    case '+': result = left + right; break;
-                    case '-': result = left - right; break;
-                    case '*': result = left * right; break;
-                    case '/': result = left / right; break;
-                    case '%': result = left % right; break;
-                    case '**': result = left ** right; break;
-                    case '<': result = left < right; break;
-                    case '<=': result = left <= right; break;
-                    case '>': result = left > right; break;
-                    case '>=': result = left >= right; break;
-                    case '==': result = left == right; break;   // eslint-disable-line
-                    case '!=': result = left != right; break;   // eslint-disable-line
-                    case '===': result = left === right; break;
-                    case '!==': result = left !== right; break;
-                    default: return;
-                }
+        let result: number | boolean | null = null;
+        switch (node.operator) {
+            case '+': result = left + right; break;
+            case '-': result = left - right; break;
+            case '*': result = left * right; break;
+            case '/': result = left / right; break;
+            case '%': result = left % right; break;
+            case '**': result = left ** right; break;
+            case '<': result = left < right; break;
+            case '<=': result = left <= right; break;
+            case '>': result = left > right; break;
+            case '>=': result = left >= right; break;
+            case '==': result = left == right; break;   // eslint-disable-line
+            case '!=': result = left != right; break;   // eslint-disable-line
+            case '===': result = left === right; break;
+            case '!==': result = left !== right; break;
+            default: return;
+        }
 
-                if (typeof result === 'number') path.replaceWith(t.numericLiteral(result));
-                else if (typeof result === 'boolean') path.replaceWith(t.booleanLiteral(result));
+        if (typeof result === 'number') path.replaceWith(t.numericLiteral(result));
+        else if (typeof result === 'boolean') path.replaceWith(t.booleanLiteral(result));
     };
 
     const collectBinaryPaths = (): NodePath<t.BinaryExpression>[] | null => {
@@ -1370,73 +1370,73 @@ const buildMappedFile = async (inputJS: string): Promise<string> => {
     console.log('[ast3] folded binary expressions in', benchmark());
 
     const inlineScopeConstants = (scope: Scope) => {
-            const toInline = new Map<string, t.Expression>();
+        const toInline = new Map<string, t.Expression>();
 
-            for (const [name, binding] of Object.entries(scope.bindings)) {
-                if (!binding.constant) continue;
-                const decl = binding.path.node;
-                if (!t.isVariableDeclarator(decl) || !decl.init) continue;
+        for (const [name, binding] of Object.entries(scope.bindings)) {
+            if (!binding.constant) continue;
+            const decl = binding.path.node;
+            if (!t.isVariableDeclarator(decl) || !decl.init) continue;
 
-                const isForLoopVar = binding.path.parentPath?.isForStatement() ||
-                    binding.path.parentPath?.isForInStatement() ||
-                    binding.path.parentPath?.isForOfStatement();
+            const isForLoopVar = binding.path.parentPath?.isForStatement() ||
+                binding.path.parentPath?.isForInStatement() ||
+                binding.path.parentPath?.isForOfStatement();
 
-                if (isForLoopVar) continue;
+            if (isForLoopVar) continue;
 
-                const usedAsCallee = binding.referencePaths.some(ref =>
-                    t.isCallExpression(ref.parent) && ref.parent.callee === ref.node
-                );
-                if (usedAsCallee) continue;
+            const usedAsCallee = binding.referencePaths.some(ref =>
+                t.isCallExpression(ref.parent) && ref.parent.callee === ref.node
+            );
+            if (usedAsCallee) continue;
 
-                const usedAsMemberObject = binding.referencePaths.some(ref =>
-                    (t.isMemberExpression(ref.parent) || t.isOptionalMemberExpression(ref.parent)) && ref.parent.object === ref.node
-                );
-                if (usedAsMemberObject) continue;
+            const usedAsMemberObject = binding.referencePaths.some(ref =>
+                (t.isMemberExpression(ref.parent) || t.isOptionalMemberExpression(ref.parent)) && ref.parent.object === ref.node
+            );
+            if (usedAsMemberObject) continue;
 
-                let init = decl.init;
+            let init = decl.init;
 
-                if (t.isBinaryExpression(init) &&
-                    t.isNumericLiteral(init.left) &&
-                    t.isNumericLiteral(init.right)) {
-                    let result: number | null = null;
-                    switch (init.operator) {
-                        case '+': result = init.left.value + init.right.value; break;
-                        case '-': result = init.left.value - init.right.value; break;
-                        case '*': result = init.left.value * init.right.value; break;
-                        case '/': result = init.left.value / init.right.value; break;
-                        case '%': result = init.left.value % init.right.value; break;
-                    }
-                    if (result !== null) {
-                        decl.init = t.numericLiteral(result);
-                        init = decl.init;
-                    }
+            if (t.isBinaryExpression(init) &&
+                t.isNumericLiteral(init.left) &&
+                t.isNumericLiteral(init.right)) {
+                let result: number | null = null;
+                switch (init.operator) {
+                    case '+': result = init.left.value + init.right.value; break;
+                    case '-': result = init.left.value - init.right.value; break;
+                    case '*': result = init.left.value * init.right.value; break;
+                    case '/': result = init.left.value / init.right.value; break;
+                    case '%': result = init.left.value % init.right.value; break;
                 }
-
-                const refs = binding.referencePaths;
-
-                if (!mappings.collapseBlacklists.includes(name)) {
-                    if (t.isBooleanLiteral(init) || t.isNullLiteral(init) || t.isNumericLiteral(init) || t.isStringLiteral(init)) {
-                        if (refs.length > 0) toInline.set(name, init);
-                        else if (name.includes('__unusedVar_')) binding.path.remove();
-                    }
+                if (result !== null) {
+                    decl.init = t.numericLiteral(result);
+                    init = decl.init;
                 }
             }
 
-            for (const [name, value] of toInline) {
-                const binding = scope.bindings[name];
-                for (const ref of binding.referencePaths) {
-                    if (ref === binding.path.get('id')) continue;
+            const refs = binding.referencePaths;
 
-                    const refBinding = ref.scope.getBinding(name);
-                    if (refBinding !== binding) continue;
-
-                    if (t.isNullLiteral(value)) ref.replaceWith(t.nullLiteral());
-                    else if (t.isBooleanLiteral(value)) ref.replaceWith(t.booleanLiteral(value.value));
-                    else if (t.isNumericLiteral(value)) ref.replaceWith(t.numericLiteral(value.value));
-                    else if (t.isStringLiteral(value)) ref.replaceWith(t.stringLiteral(value.value));
+            if (!mappings.collapseBlacklists.includes(name)) {
+                if (t.isBooleanLiteral(init) || t.isNullLiteral(init) || t.isNumericLiteral(init) || t.isStringLiteral(init)) {
+                    if (refs.length > 0) toInline.set(name, init);
+                    else if (name.includes('__unusedVar_')) binding.path.remove();
                 }
-                binding.path.remove();
             }
+        }
+
+        for (const [name, value] of toInline) {
+            const binding = scope.bindings[name];
+            for (const ref of binding.referencePaths) {
+                if (ref === binding.path.get('id')) continue;
+
+                const refBinding = ref.scope.getBinding(name);
+                if (refBinding !== binding) continue;
+
+                if (t.isNullLiteral(value)) ref.replaceWith(t.nullLiteral());
+                else if (t.isBooleanLiteral(value)) ref.replaceWith(t.booleanLiteral(value.value));
+                else if (t.isNumericLiteral(value)) ref.replaceWith(t.numericLiteral(value.value));
+                else if (t.isStringLiteral(value)) ref.replaceWith(t.stringLiteral(value.value));
+            }
+            binding.path.remove();
+        }
     };
 
     const collectScopes = (): Scope[] | null => {

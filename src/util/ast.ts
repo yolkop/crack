@@ -118,7 +118,7 @@ export const visitAstScoped = (root: t.Node, visitors: Record<string, (path: { n
     });
 };
 
-export const getObjectKeys =(node: t.ObjectExpression): string[] => node.properties
+export const getObjectKeys = (node: t.ObjectExpression): string[] => node.properties
     .filter(p => t.isObjectProperty(p) && t.isIdentifier(p.key))
     .map(p => (p as t.ObjectProperty).key)
     .filter(k => t.isIdentifier(k))
